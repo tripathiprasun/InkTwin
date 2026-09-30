@@ -1,5 +1,5 @@
 // Set this to your Render URL before deploying the frontend (see README).
-const API = (window.INKTWIN_API_BASE || "http://localhost:5000").replace(/\/$/, "");
+const API = "https://inktwin-api.onrender.com";
 const CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?'-:;()/@&$%+=";
 const $ = (id) => document.getElementById(id);
 const state = { profile: null, mood: "normal", pages: [], pdf: null, busy: false, timer: null, adding: false, mode: "sheet", sig: null };

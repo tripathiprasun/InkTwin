@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>InkTwin: Teach it your handwriting</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23161a2b'/%3E%3Cpath d='M32 10c7 10 13 17 13 25a13 13 0 0 1-26 0c0-8 6-15 13-25z' fill='%23f4efe6'/%3E%3Cpath d='M32 26v20' stroke='%23161a2b' stroke-width='3.5' stroke-linecap='round'/%3E%3Ccircle cx='32' cy='23' r='3' fill='%23161a2b'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar"><div class="logo">InkTwin<i></i></div><div id="status" class="status" role="status" aria-live="polite"></div></header>
+<main>
+<section id="s-upload" class="step">
+  <h1>Teach it your handwriting.</h1>
+  <div class="seg tabs" id="modes"><button data-m="sheet" class="on">Printable sheet</button><button data-m="free">Any paper</button></div>
+  <div id="m-sheet">
+    <p class="lead">Print the calibration sheet, fill in the boxes with your own pen, then upload a photo or scan.</p>
+    <ol class="how">
+      <li><a id="tpl" href="#" download>Download the calibration sheet</a> and print it.</li>
+      <li>Write each character three times on the dashed baseline. Keep all four black squares visible.</li>
+      <li>Photograph it upright and flat, in even light, or scan it.</li>
+    </ol>
+  </div>
+  <div id="m-free" hidden>
+    <p class="lead">Copy these lines onto any plain paper with your own pen, then upload one photo.</p>
+    <div class="guide"><div class="paperlines" id="lines"><p class="muted">Loading the lines to copy…</p></div></div>
+    <ol class="how">
+      <li>Copy each line exactly, in this order, one line per row, with an empty row between lines.</li>
+      <li>Write in separate letters, like neat print. Joined letters can't be told apart.</li>
+      <li>Leave a clear gap between words. Use your normal size and a dark pen.</li>
+      <li>Photograph the page from straight above in even light, with the page filling the frame.</li>
+    </ol>
+  </div>
+  <label class="consent"><input type="checkbox" id="consent"> I'm uploading handwriting I have permission to use. Photos are processed in memory and not stored.</label>
+  <div class="row"><input type="file" id="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+  <button class="primary" id="pick">Upload Handwriting</button><span id="fname" class="muted"></span></div>
+</section>
+<section id="s-profile" class="step" hidden>
+  <h1>Your handwriting is ready.</h1>
+  <p class="lead" id="pstats"></p>
+  <p class="muted small">Every captured letter is shown below. Click any that looks wrong to remove it.</p>
+  <div id="sheet" class="sheet"></div>
+  <p id="pmiss" class="muted small"></p>
+  <div class="row"><button class="primary" id="toWrite">Write Something</button><button class="ghost" id="addmore">Add another photo</button><button class="ghost" id="redo">Start over</button></div>
+</section>
+<section id="s-write" class="step wide" hidden>
+  <div class="work">
+    <div class="col-main">
+      <div id="editorBox">
+        <h1>Write</h1>
+        <textarea id="text" spellcheck="false" maxlength="12000" aria-label="Text to write">Hello, this is my handwriting.</textarea>
+        <div class="row"><button class="primary" id="gen">Generate</button><span class="muted small" id="count"></span></div>
+      </div>
+      <div id="result" hidden>
+        <div class="toolbar">
+          <button class="primary" id="regen">Regenerate</button>
+          <button class="ghost" id="dlpng">Download PNG</button>
+          <button class="ghost" id="dlpdf">Download PDF</button>
+          <label class="zoom">Zoom <input type="range" id="zoom" min="40" max="140" value="100"></label>
+        </div>
+        <div class="toolbar"><span class="muted small">Scanned copy</span>
+          <select id="scanmode"><option value="magic">Magic color</option><option value="gray">Grayscale</option><option value="bw">Black &amp; white</option></select>
+          <button class="ghost" id="scanjpg">Download scan (JPG)</button><button class="ghost" id="scanpdf">Download scan (PDF)</button></div>
+        <div id="pages" class="pages"></div>
+      </div>
+    </div>
+    <aside class="panel" aria-label="Settings">
+      <h2>Variation</h2>
+      <input type="range" id="variation" min="0" max="100" value="50"><div class="ends"><span>Low</span><span>High</span></div>
+      <h2>Writing</h2>
+      <div class="seg" id="mood"><button data-v="neat">Neat</button><button data-v="normal" class="on">Normal</button><button data-v="rushed">Rushed</button><button data-v="messy">Messy</button></div>
+      <h2>Paper</h2>
+      <select id="paper"><option value="classmate" selected>Classmate notebook</option><option value="blank">A4 plain white</option><option value="notebook">Spiral notebook</option><option value="lined">Lined A4</option><option value="graph">Graph paper</option><option value="exam">Exam sheet</option></select>
+      <h2>Pen</h2>
+      <select id="pen"><option value="ballpoint">Ballpoint</option><option value="gel">Gel pen</option><option value="pencil">Pencil</option></select>
+      <h2>Signature <span class="muted small">(optional)</span></h2>
+      <div class="sigrow"><img id="sigprev" alt="Your signature" hidden><button class="ghost" id="sigbtn">Draw signature</button></div>
+      <select id="sigpos"><option value="right">Top right</option><option value="left">Top left</option><option value="center">Top center</option></select>
+      <button class="link" id="sigrm" hidden>Remove signature</button>
+      <h2>Seed <span class="muted small">(optional)</span></h2>
+      <input type="text" id="seed" inputmode="numeric" placeholder="Random every time">
+      <button class="link" id="edit">Edit text</button>
+      <button class="link" id="newprofile">New handwriting profile</button>
+    </aside>
+  </div>
+</section>
+</main>
+<dialog id="sigdlg"><h2>Draw your signature</h2><canvas id="sigcv" width="600" height="220"></canvas>
+<label class="consent"><input type="checkbox" id="sigok"> This is my own signature. I'm not signing as someone else.</label>
+<div class="row"><button class="primary" id="sigsave">Use signature</button><button class="ghost" id="sigclear">Clear</button><button class="ghost" id="sigcancel">Cancel</button></div></dialog>
+<script src="app.js"></script>
+</body>
+</html>

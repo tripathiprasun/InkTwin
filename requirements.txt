@@ -1,0 +1,6 @@
+flask>=3.0
+flask-cors>=4.0
+gunicorn>=21.2
+numpy>=1.26
+opencv-python-headless>=4.9
+pillow>=10.1

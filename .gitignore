@@ -1,0 +1,65 @@
+# ---- PyCharm / JetBrains ----
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.idea_modules/
+
+# ---- Python bytecode / caches ----
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Packaging / build ----
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---- Environment variables and secrets ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- Testing / coverage ----
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# ---- Logs and temp files ----
+*.log
+*.tmp
+*.bak
+*.swp
+
+# ---- Flask ----
+instance/
+.webassets-cache
+
+# ---- Uploads / generated output (keep user data out of git) ----
+uploads/
+output/
+
+# ---- OS files ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- VS Code (in case you switch editors) ----
+.vscode/

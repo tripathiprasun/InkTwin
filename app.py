@@ -1,5 +1,5 @@
-import os, io, base64
-from flask import Flask, request, jsonify, send_file
+import os, io, json, base64, itertools
+from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 import engine
 
@@ -7,7 +7,7 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_REQUEST_MB", "40")) * 1024 * 1024
 CORS(app, origins=[o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")])
 MAX_FILE = int(os.getenv("MAX_FILE_MB", "12")) * 1024 * 1024
-MAX_TEXT = 12000
+MAX_TEXT = int(os.getenv("MAX_TEXT", "60000"))
 
 
 def err(msg, code=400):
@@ -29,7 +29,7 @@ def boom(e):
 
 @app.get("/api/health")
 def health():
-    return jsonify(ok=True)
+    return jsonify(ok=True, max_text=MAX_TEXT, max_pages=engine.MAX_PAGES)
 
 
 @app.get("/api/prompt")
@@ -49,7 +49,7 @@ def profile():
         return err("Confirm you have permission to use this handwriting.")
     files = request.files.getlist("samples")[:4]
     if not files:
-        return err("Upload at least one photo or scan of the calibration sheet.")
+        return err("Upload at least one photo or scan.")
     samples, rep = [], [0, 0]
     free = request.form.get("mode") == "free"
     for f in files:  # processed in memory only; nothing is written to disk
@@ -70,21 +70,32 @@ def profile():
         return err(str(e))
 
 
+def clean_adjust(raw):
+    out = {}
+    if isinstance(raw, dict):
+        for k, v in list(raw.items())[:8000]:
+            try:
+                dx, dy, dr, ds = (float(x) for x in v)
+            except Exception:
+                continue
+            if str(k).isdigit():
+                out[str(k)] = (max(-80, min(80, dx)), max(-80, min(80, dy)), max(-30, min(30, dr)), max(.5, min(2., ds)))
+    return out
+
+
 @app.post("/api/generate")
 def generate():
+    """Streams NDJSON: one line per page {n, img (base64 JPEG|null), glyphs}, then {done, seed, missing, truncated}."""
     d = request.get_json(silent=True) or {}
     text, prof = d.get("text"), d.get("profile")
     if not isinstance(text, str) or not text.strip():
         return err("Type some text first.")
     if len(text) > MAX_TEXT:
-        return err(f"Text is too long (max {MAX_TEXT} characters).")
+        return err(f"Text is too long (max {MAX_TEXT:,} characters).")
     if not isinstance(prof, dict) or not isinstance(prof.get("glyphs"), dict) or len(prof["glyphs"]) < 20:
         return err("Invalid handwriting profile. Rebuild it from a sample.")
-    try:
-        float(prof["x_height"])
-    except Exception:
-        return err("Invalid handwriting profile.")
     s = d.get("settings") or {}
+    only = s.get("only")
     clean = dict(
         variation=min(max(float(s.get("variation", .5)), 0), 1),
         mood=s.get("mood") if s.get("mood") in engine.MOODS else "normal",
@@ -92,14 +103,29 @@ def generate():
         pen=s.get("pen") if s.get("pen") in engine.PENS else "ballpoint",
         seed=int(s["seed"]) if str(s.get("seed", "")).lstrip("-").isdigit() else None,
         signature=engine.load_signature(s.get("signature")),
-        sig_pos=s.get("sig_pos") if s.get("sig_pos") in ("left", "center", "right") else "right")
+        sig_pos=s.get("sig_pos") if s.get("sig_pos") in ("left", "center", "right") else "right",
+        adjust=clean_adjust(s.get("adjust")),
+        only={i for i in only if isinstance(i, int)} if isinstance(only, list) else None)
     try:
-        r = engine.generate(prof, text, clean)
-    except (KeyError, ValueError, TypeError):
+        it = engine.generate(prof, text, clean)
+        first = next(it)  # surfaces an invalid profile before streaming starts
+    except (KeyError, ValueError, TypeError, StopIteration):
         return err("Invalid handwriting profile. Rebuild it from a sample.")
-    b64 = lambda b: base64.b64encode(b).decode()
-    return jsonify(pages=[b64(p) for p in r["pages"]], pdf=b64(r["pdf"]), seed=r["seed"],
-                   missing=r["missing"], truncated=r["truncated"])
+
+    def stream():
+        try:
+            for item in itertools.chain([first], it):
+                if item[0] == "page":
+                    _, n, data, man = item
+                    yield json.dumps(dict(n=n, img=base64.b64encode(data).decode() if data else None, glyphs=man)) + "\n"
+                else:
+                    yield json.dumps(dict(done=True, **item[1])) + "\n"
+        except Exception:
+            app.logger.exception("generate failed")
+            yield json.dumps(dict(error="Generation failed on the server.")) + "\n"
+
+    return Response(stream_with_context(stream()), mimetype="application/x-ndjson",
+                    headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
 
 if __name__ == "__main__":

@@ -1,51 +1,26 @@
-# ✒️ InkTwin
+# InkTwin
 
-![Python](https://img.shields.io/badge/python-3.10+-blue)
-![Flask](https://img.shields.io/badge/backend-Flask-black)
-![OpenCV](https://img.shields.io/badge/vision-OpenCV-green)
-![Hosting](https://img.shields.io/badge/hosting-GitHub%20Pages%20%2B%20Render-lightgrey)
-
-**Teach it your handwriting.** Upload a photo of a calibration sheet you filled in; InkTwin builds a personal handwriting profile (several variants of every character plus style measurements) and renders new pages that vary naturally on every generation.
-
-**Live demo:** https://tripathiprasun.github.io/InkTwin/
-**Repository:** https://github.com/tripathiprasun/InkTwin
+Teach it your handwriting. Upload a photo of a calibration sheet you filled in; InkTwin builds a personal handwriting profile (several variants of every character plus style measurements) and renders new pages that vary naturally on every generation.
 
 Frontend: plain HTML/CSS/JS (GitHub Pages). Backend: Flask + OpenCV + Pillow (Render). No database, no accounts.
 
-## Table of contents
-- [Run locally](#run-locally)
-- [Deploy](#deploy)
-- [API](#api)
-- [Pipeline](#pipeline)
-- [The profile](#the-profile)
-- [Natural variation](#natural-variation)
-- [Extending with ML](#extending-with-ml)
-- [Privacy and limits](#privacy-and-limits)
-- [Free-paper calibration](#free-paper-calibration-default)
-- [Paper styles, signature, scan](#paper-signature-scan-latest)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [Author](#author)
-
 ## Run locally
 ```bash
-git clone https://github.com/tripathiprasun/InkTwin.git
-cd InkTwin/backend
+cd backend
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python app.py                                          # http://localhost:5000
 # new terminal
-cd InkTwin/frontend && python -m http.server 8000      # http://localhost:8000
+cd frontend && python -m http.server 8000              # http://localhost:8000
 ```
 Open http://localhost:8000, download the sheet, print it, fill it in, photograph/scan it, upload. The frontend defaults to `http://localhost:5000`.
 
 ## Deploy
-**Backend (Render):** New → Web Service → connect `tripathiprasun/InkTwin`. Root directory `backend`; build `pip install -r requirements.txt`; start `gunicorn app:app --workers 1 --timeout 120`. Set env `ALLOWED_ORIGINS=https://tripathiprasun.github.io`. (Free instances sleep; first request may be slow. Keep workers at 1 for 512 MB RAM.)
+**Backend (Render):** New → Web Service → connect repo. Root directory `backend`; build `pip install -r requirements.txt`; start `gunicorn app:app --workers 1 --timeout 600`. Set env `ALLOWED_ORIGINS=https://YOUR_USER.github.io`. (Free instances sleep; first request may be slow. Keep workers at 1 for 512 MB RAM.)
 
 **Frontend (GitHub Pages):** In `frontend/index.html`, add before `app.js`:
-`<script>window.INKTWIN_API_BASE="https://YOUR-SERVICE.onrender.com"</script>`
-(replace `YOUR-SERVICE` with the name Render gives your web service).
-Push, then Settings → Pages → deploy from branch, folder `/frontend` (or copy the folder to `/docs`). The site will be served at `https://tripathiprasun.github.io/InkTwin/`.
+`<script>window.INKTWIN_API_BASE="https://YOUR-SERVICE.onrender.com"</script>`.
+Push, then Settings → Pages → deploy from branch, folder `/frontend` (or copy the folder to `/docs`).
 
 ## API
 | Method | Path | Body | Returns |
@@ -54,7 +29,6 @@ Push, then Settings → Pages → deploy from branch, folder `/frontend` (or cop
 | GET | `/api/template` | – | calibration sheet PNG |
 | POST | `/api/profile` | multipart: `samples` (1–4 JPG/PNG/WEBP, ≤12 MB, ≤40 MP), `consent=true` | `{profile}` |
 | POST | `/api/generate` | JSON `{profile, text (≤12000 chars), settings:{variation 0–1, mood neat/normal/rushed/messy, paper lined/notebook/blank/graph/exam, pen ballpoint/gel/pencil, seed?}}` | `{pages:[base64 PNG], pdf:base64, seed, missing, truncated}` |
-
 Errors: `{error: "message"}` with 4xx/5xx. The profile is stateless: the browser keeps it (localStorage) and sends it with each generate call.
 
 ## Pipeline
@@ -83,24 +57,18 @@ Only upload handwriting you have permission to use. Samples are processed in mem
 ## Free-paper calibration (default)
 `POST /api/profile` with `mode=free` (multipart, same fields). `GET /api/prompt` returns the 8 lines the user copies onto any paper. Pipeline (`extract_free`): normalise lighting and ink -> erase printed ruled lines -> deskew -> find the writing lines (merging fragments until the count equals the prompt's) -> connected components, merging dots/bars with their letter -> since we know each line's word count, split clusters at the widest gaps -> accept a word only if cluster count equals letter count (labels come from the known text, no OCR) -> per-word baseline from non-descender letters -> rescale so x-height = 30 px. Response adds `report:{matched,total}` words. Unmatched words are skipped, so print-style letters work best; users can delete wrongly read glyphs in the UI and add more photos.
 
+## Classmate-style pages
+Paper `classmate`: cool-white page, blue rules, double red margin. Every page also gets photographed-page realism: uneven lighting, spine shadow, faint back-side show-through (classmate), gentle page curl that bends rules and text together, scan noise.
+
 ## Paper, signature, scan (latest)
-- **Papers:** A4 plain white, Classmate notebook (cool-white page, blue rules, 46 px rule pitch, double red margin + header rule), Spiral notebook, Lined A4, Graph, Exam. All A4 at 150 dpi (1240x1754).
-- **Photographed-page realism** on every page: uneven lighting, spine shadow, faint back-side show-through (Classmate), gentle page curl that bends rules and text together, scan noise.
-- **Signature:** drawn by the user in a pad (consent checkbox), sent as a transparent PNG with the generate request (`settings.signature`, `settings.sig_pos` left/center/right), stamped as-is at the top of page 1 with the chosen pen. It is never generated from the handwriting profile and never stored.
-- **Scanned copy:** client-side (canvas). Shadow removal (paper-brightness map), white-balance, levels; modes Magic color / Grayscale / Black & white; download as JPG or a PDF built in the browser.
-- **Calibration:** the printable sheet is the default tab; "Any paper" is the alternative.
+- Papers: A4 plain white, Classmate notebook (46 px rule pitch, double red margin + header rule), Spiral notebook, Lined A4, Graph, Exam. All A4 at 150 dpi (1240x1754). Every page gets photographed-page realism.
+- Signature: drawn by the user in a pad (consent checkbox), sent as a transparent PNG with the generate request (`settings.signature`, `settings.sig_pos` left/center/right), stamped as-is at the top of page 1 with the chosen pen. It is never generated from the handwriting profile and never stored.
+- Scanned copy: client-side (canvas). Shadow removal (paper-brightness map), white-balance, levels; modes Magic color / Grayscale / Black & white; download as JPG or a PDF built in the browser.
+- Calibration: the printable sheet is the default tab; "Any paper" is the alternative.
 
-## Roadmap
-- [ ] Cursive joins between letters
-- [ ] In-app glyph correction
-- [ ] Pen-lift simulation
-- [ ] Stroke-sequence ML model for words (see *Extending with ML*)
-
-## Contributing
-Issues and pull requests are welcome at https://github.com/tripathiprasun/InkTwin/issues.
-1. Fork the repo and create a branch: `git checkout -b feature/my-change`
-2. Commit your changes and push the branch
-3. Open a pull request describing what changed and why
-
-## Author
-Made by [@tripathiprasun](https://github.com/tripathiprasun).
+## Limits, formatting, letter editing (latest)
+- Limits (env, see `.env.example`): `MAX_TEXT` default 60,000 characters, `MAX_PAGES` default 30. Use start command `gunicorn app:app --workers 1 --timeout 600`.
+- `POST /api/generate` now streams NDJSON: one line per page `{n, img (base64 JPEG or null), glyphs}` then `{done, seed, missing, truncated}`. Pages appear as they finish; PDF/PNG/scan are built in the browser, so there is no page cap beyond `MAX_PAGES`.
+- `glyphs` is `[[id, x, y, w, h], ...]` in page pixels (1240x1754). Send back `settings.seed` (from `done`), `settings.adjust` = `{id: [dx, dy, rotDeg, scale]}` and `settings.only` = `[pageIndex]` to re-render just those pages with letters moved; the layout is deterministic for a given seed.
+- Calibration sheet covers all 94 printable keyboard characters (5 groups x 19 rows, A4 ratio). Old 4-column sheets are not compatible.
+- Text markup: `# Heading`, `## Subheading`, `**bold**`, `//italic//`, `__underline__`, `{{r|red}}` (r b g k), `- bullet`, `[center] `, `[right] `, tables as `|a|b|` lines. Escape with a backslash.

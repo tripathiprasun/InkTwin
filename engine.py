@@ -2,18 +2,23 @@
 
 A learned stroke model can later replace `render_*` (see README "Extending with ML").
 """
-import io, base64, math
+import io, os, re, base64, math
 import numpy as np
 import cv2
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 
-CHARS = list("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?'-:;()/@&$%+=")
+CHARS = list("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" + "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")  # every keyboard character
+CAP = {"I": "cap i", "l": "low L", "O": "cap o", "0": "zero", "1": "one", "|": "bar", "`": "tick", "'": "apost", '"': "quote",
+       ",": "comma", ".": "dot", "-": "dash", "_": "under", "~": "tilde", "^": "caret", "\\": "bkslsh", "/": "slash",
+       ":": "colon", ";": "semi", "*": "star", "#": "hash", "<": "less", ">": "more", "{": "brace", "}": "brace",
+       "[": "brckt", "]": "brckt", "(": "paren", ")": "paren", "!": "bang", "?": "query", "@": "at", "&": "and",
+       "$": "dollar", "%": "pct", "+": "plus", "=": "equals"}
 CHARSET = set(CHARS)
 
 # ---- template geometry (shared by template generator and extractor) ----
-W, H = 1500, 2400
-GROUPS, REPS, LBL, CELL = 4, 3, 40, 100
-X0, Y0, BASE = (W - GROUPS * (LBL + REPS * CELL)) // 2, 220, 68
+W, H = 1800, 2546
+GROUPS, REPS, LBL, CELL = 5, 3, 40, 100
+X0, Y0, BASE = (W - GROUPS * (LBL + REPS * CELL)) // 2, 250, 68
 MARK = [(70, 70), (W - 70, 70), (70, H - 70), (W - 70, H - 70)]  # TL TR BL BR centres
 
 
@@ -29,14 +34,17 @@ def make_template() -> bytes:
     d = ImageDraw.Draw(im)
     for cx, cy in MARK:
         d.rectangle((cx - 30, cy - 30, cx + 30, cy + 30), fill=0)
-    d.text((140, 70), "InkTwin calibration sheet", fill=60, font=_font(40))
-    d.text((140, 125), "Write each character 3 times, inside its boxes, on the dashed baseline. "
-           "Use your normal pen & size. Keep all 4 black squares visible.", fill=110, font=_font(22))
-    d.text((140, 160), "Only use handwriting you have permission to use.", fill=110, font=_font(22))
+    d.text((140, 62), "InkTwin calibration sheet", fill=60, font=_font(40))
+    for n_, t_ in enumerate(["Write the big character on the left of each group once in each of its 3 boxes, the way you normally write it.",
+                             "Sit letters on the dashed line (g j p q y may dip below). Stay inside the box. Dark pen, normal size.",
+                             "The small word under a character clears up look-alikes. Leave a box empty if you slip. Keep all 4 black squares visible.",
+                             "Only use handwriting you have permission to use."]):
+        d.text((140, 118 + n_ * 30), t_, fill=100, font=_font(21))
     for i, ch in enumerate(CHARS):
         r, c = divmod(i, GROUPS)
         gx, gy = X0 + c * (LBL + REPS * CELL), Y0 + r * CELL
-        d.text((gx + 10, gy + 30), ch, fill=90, font=_font(34))
+        d.text((gx + 10, gy + 22), ch, fill=90, font=_font(34))
+        d.text((gx + 3, gy + 72), CAP.get(ch, ''), fill=110, font=_font(12))
         for k in range(REPS):
             cx = gx + LBL + k * CELL
             d.rectangle((cx, gy, cx + CELL, gy + CELL), outline=200)
@@ -199,7 +207,7 @@ def _decode(profile):
 
 # ---- paper ----
 PW, PH, PITCH = 1240, 1754, 54
-MAX_PAGES = 10
+MAX_PAGES = int(os.getenv("MAX_PAGES", "30"))
 PENS = dict(ballpoint=dict(color=(28, 44, 128), op=.92, gain=1.0, blur=.45, bleed=.12),
             gel=dict(color=(14, 14, 24), op=.98, gain=1.25, blur=.7, bleed=.30),
             pencil=dict(color=(72, 72, 78), op=.80, gain=.95, blur=.6, bleed=.10))
@@ -281,39 +289,50 @@ def load_signature(v):
         return None
 
 
-def finish_page(ink, paper, pen, rng, kind=""):
+# ---- rendering: styled layout, ink layers, page realism ----
+PALETTE = dict(r=(196, 32, 44), b=(30, 60, 175), g=(22, 120, 70), k=(16, 16, 22))
+SUBS = {"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "\u2013": "-", "\u2014": "-", "\u2026": "..."}
+TOKC = re.compile(r"\{\{([rbgk])\|")
+
+
+def finish_page(inks, paper, pen, rng, kind=""):
     P = PENS[pen]
-    a = ink
+    lf = 0.9 + 0.12 * cv2.resize(rng.random((12, 9)).astype(np.float32), (PW, PH), interpolation=cv2.INTER_CUBIC)
+    gr = sk = None
     if pen == "pencil":
         gr = cv2.GaussianBlur(rng.random((PH, PW)).astype(np.float32), (0, 0), 0.7)
         gr = (gr - gr.min()) / (np.ptp(gr) + 1e-6)
-        a = a * (0.55 + 0.6 * gr)
-    a = a * (0.9 + 0.12 * cv2.resize(rng.random((12, 9)).astype(np.float32), (PW, PH), interpolation=cv2.INTER_CUBIC))
     if pen == "ballpoint":  # faint skipping
         sk = cv2.GaussianBlur(rng.random((PH, PW)).astype(np.float32), (0, 0), 2)
-        a = a * np.where((sk - sk.mean()) / sk.std() > 1.9, 0.6, 1.0)
-    a = np.maximum(a, P["bleed"] * cv2.GaussianBlur(a, (0, 0), 1.2))
-    a = np.clip(a * P["op"], 0, 1)
-    out = paper * (1 - a[..., None] * (1 - np.array(P["color"], np.float32) / 255))
-    # photographed-page realism: uneven light, spine shadow, back-side show-through, gentle page curl
+        sk = np.where((sk - sk.mean()) / sk.std() > 1.9, 0.6, 1.0).astype(np.float32)
+    out = paper
+    for name, ink in inks.items():  # one layer per ink colour, multiplied onto the paper
+        a = ink * lf
+        if gr is not None:
+            a = a * (0.55 + 0.6 * gr)
+        if sk is not None:
+            a = a * sk
+        a = np.clip(np.maximum(a, P["bleed"] * cv2.GaussianBlur(a, (0, 0), 1.2)) * P["op"], 0, 1)
+        col = np.array(P["color"] if pen == "pencil" or name == "pen" else PALETTE[name], np.float32) / 255
+        out = out * (1 - a[..., None] * (1 - col))
+    back = np.max(list(inks.values()), axis=0) if inks else np.zeros((PH, PW), np.float32)
     xs = np.linspace(0, 1, PW, dtype=np.float32)[None, :, None]
     yv = np.linspace(0, 1, PH, dtype=np.float32)[:, None, None]
     th = rng.uniform(0, 6.28)
     out = out * 1.05 * (1 + 0.07 * ((xs - .5) * math.cos(th) + (yv - .5) * math.sin(th))) * (1 - 0.13 * np.exp(-xs / 0.06))
     if kind == "classmate":
-        out = out * (1 - 0.06 * cv2.GaussianBlur(ink[:, ::-1].copy(), (0, 0), 2.2)[..., None])
+        out = out * (1 - 0.06 * cv2.GaussianBlur(back[:, ::-1].copy(), (0, 0), 2.2)[..., None])
     gx, gy = np.meshgrid(np.arange(PW, dtype=np.float32), np.arange(PH, dtype=np.float32))
     ph = rng.uniform(0, 6.28)
     out = cv2.remap(out.astype(np.float32), gx + 2.0 * np.sin(gy / PH * 3 + ph), gy + 3.0 * np.sin(gx / PW * 3.1 + ph),
                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
     out = cv2.GaussianBlur(out, (0, 0), 0.45) + rng.normal(0, 1.2, (PH, PW, 1)).astype(np.float32)
     buf = io.BytesIO()
-    Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).save(buf, "PNG")
+    Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).save(buf, "JPEG", quality=90)
     return buf.getvalue()
 
 
-# ---- glyph stamping ----
-def stamp(ink, g, sc, x, by, ang, shear, gain, blur):
+def stamp(ink, g, sc, x, by, ang, shear, gain, blur, bold=0):
     a = g["a"]
     h, w = a.shape
     nw, nh = max(1, round(w * sc)), max(1, round(h * sc))
@@ -324,7 +343,7 @@ def stamp(ink, g, sc, x, by, ang, shear, gain, blur):
     S = np.array([[1, shear, -shear * cy], [0, 1, 0], [0, 0, 1]])
     R = np.vstack([cv2.getRotationMatrix2D((cx, cy), ang, 1), [0, 0, 1]])
     c = cv2.warpAffine(c, (R @ S)[:2], (c.shape[1], c.shape[0]), flags=cv2.INTER_LINEAR)
-    c = np.clip(cv2.GaussianBlur(c, (0, 0), blur) * gain, 0, 1)
+    c = np.clip(cv2.GaussianBlur(c, (0, 0), blur + .3 * bold) * gain * (1 + .35 * bold), 0, 1)
     x0, y0 = int(round(x - p)), int(round(by - cy))
     sx0, sy0 = max(0, -x0), max(0, -y0)
     ex, ey = min(c.shape[1], PW - x0), min(c.shape[0], PH - y0)
@@ -334,10 +353,33 @@ def stamp(ink, g, sc, x, by, ang, shear, gain, blur):
     ink[y0 + sy0:y0 + ey, x0 + sx0:x0 + ex] = 1 - (1 - reg) * (1 - c[sy0:ey, sx0:ex])
 
 
-SUBS = {'"': "''", "\u201c": "''", "\u201d": "''", "\u2018": "'", "\u2019": "'", "\u2013": "-", "\u2014": "-", "\u2026": "...", "*": "+"}
+def hand_line(ink, x0, y0, x1, y1, rng, amp, th=2):
+    """Slightly wobbly pen stroke (table borders, underlines)."""
+    n = max(2, int(math.hypot(x1 - x0, y1 - y0) / 28))
+    pts = [(x0 + (x1 - x0) * k / n + rng.normal(0, .5 * amp), y0 + (y1 - y0) * k / n + rng.normal(0, .6 * amp)) for k in range(n + 1)]
+    cv2.polylines(ink, [np.round(np.array(pts)).astype(np.int32).reshape(-1, 1, 2)], False, 1.0, th, cv2.LINE_AA)
+
+
+def inline(t):
+    """**bold** //italic// __underline__ {{r|red}} (r b g k) -> [(char, (bold, italic, underline, colour))]. Backslash escapes."""
+    out, k, b, i, u, col = [], 0, 0, 0, 0, None
+    while k < len(t):
+        c2 = t[k:k + 2]
+        if t[k] == "\\" and k + 1 < len(t) and t[k + 1] in "*/_{}#-|[>":
+            out.append((t[k + 1], (b, i, u, col))); k += 2; continue
+        if c2 == "**": b ^= 1; k += 2; continue
+        if c2 == "//": i ^= 1; k += 2; continue
+        if c2 == "__": u ^= 1; k += 2; continue
+        m = TOKC.match(t, k)
+        if m: col = m.group(1); k = m.end(); continue
+        if c2 == "}}" and col: col = None; k += 2; continue
+        out.append((t[k], (b, i, u, col))); k += 1
+    return out
 
 
 def generate(profile, text, s):
+    """Generator: yields ("page", n, jpeg_bytes_or_None, glyph_manifest) per page, then ("done", meta).
+    Deterministic for a given seed + text + settings; `adjust` offsets individual glyphs without changing the layout."""
     used = s.get("seed")
     used = int(used) if used is not None else int(np.random.SeedSequence().entropy % (2 ** 31))
     rng = np.random.default_rng(used)
@@ -346,127 +388,215 @@ def generate(profile, text, s):
     amp = (0.25 + 1.5 * float(s.get("variation", .5))) * MOODS[s.get("mood", "normal")]
     P = PENS[pen]
     lay = layout(kind)
-    xh = lay["pitch"] * 0.40
+    pitch, nl = lay["pitch"], len(lay["base"])
+    xh = pitch * 0.40
     s0 = xh / float(profile["x_height"])
     sv = max(float(profile.get("size_variance", .05)), .03)
     bv = max(float(profile.get("baseline_variance", .04)), .02)
     pv = min(float(profile.get("pressure_var", .1)), .25)
-    wsp = float(profile.get("word_spacing", .75))
-    csp = float(profile.get("char_spacing", .14))
+    wsp, csp = float(profile.get("word_spacing", .75)), float(profile.get("char_spacing", .14))
     avail = lay["right"] - lay["left"]
-    missing, last = set(), {}
+    only, adj = s.get("only"), s.get("adjust") or {}
+    missing, last, inks, man = set(), {}, {}, []
+    pages = gi = li = 0
+    NS = (0, 0, 0, None)
 
     text = text.replace("\r", "").expandtabs(4)
-    for k, v in SUBS.items():
-        text = text.replace(k, v)
+    for k_, v_ in SUBS.items():
+        text = text.replace(k_, v_)
+    if '"' not in gl:
+        text = text.replace('"', "''")
+
+    def ink(name="pen"):
+        if name not in inks:
+            inks[name] = np.zeros((PH, PW), np.float32)
+        return inks[name]
 
     def pick(ch, n):
         if n == 1:
             return 0
         if rng.random() < .85:
-            o = [i for i in range(n) if i != last.get(ch)]
-            last[ch] = int(rng.choice(o))
+            last[ch] = int(rng.choice([i for i in range(n) if i != last.get(ch)]))
         else:
             last[ch] = int(rng.integers(n))
         return last[ch]
 
-    def make_word(word):
+    def make_word(chs, mult=1.0):
         ins = []
-        for ch in word:
+        for ch, st in chs:
             lst = gl.get(ch) or gl.get(ch.swapcase())
             if not lst:
                 if not ch.isspace():
                     missing.add(ch)
                 continue
             g = lst[pick(ch, len(lst))]
-            sc = s0 * float(np.clip(1 + rng.normal(0, sv * amp * .6), .8, 1.25))
+            sc = s0 * mult * float(np.clip(1 + rng.normal(0, sv * amp * .6), .8, 1.25))
             if rng.random() < .04 * amp:
                 sc *= 1 + rng.normal(0, .08)
-            ins.append((g, sc))
+            ins.append((g, sc, st))
         return ins
 
-    def wwidth(ins):
-        return sum(g["a"].shape[1] * sc + xh * csp for g, sc in ins)
+    def wwidth(ins, mult):
+        return sum(g["a"].shape[1] * sc + xh * csp * mult for g, sc, _ in ins)
 
-    def wrap(para):
-        lines, cur, cw, gap = [], [], 0, xh * wsp
-        for w in (w for w in para.split(" ") if w):
-            ins = make_word(w)
+    def words_of(chs):
+        out, cur = [], []
+        for c in chs:
+            if c[0] == " ":
+                if cur: out.append(cur); cur = []
+            else:
+                cur.append(c)
+        if cur: out.append(cur)
+        return out
+
+    def wrap(chs, av, mult=1.0):
+        lines, cur, cw, gap = [], [], 0, xh * mult * wsp
+        for w in words_of(chs):
+            ins = make_word(w, mult)
             if not ins:
                 continue
             parts = [ins]
-            if wwidth(ins) > avail:  # hard-split very long words
+            if wwidth(ins, mult) > av:  # hard-split very long words
                 parts, chunk = [], []
                 for it in ins:
-                    if wwidth(chunk + [it]) > avail and chunk:
+                    if wwidth(chunk + [it], mult) > av and chunk:
                         parts.append(chunk); chunk = []
                     chunk.append(it)
                 parts.append(chunk)
             for part in parts:
-                ww = wwidth(part)
-                if cur and cw + gap + ww > avail:
-                    lines.append(cur); cur, cw = [], 0
+                ww = wwidth(part, mult)
+                if cur and cw + gap + ww > av:
+                    lines.append((cur, cw)); cur, cw = [], 0
                 cw += (gap if cur else 0) + ww
                 cur.append(part)
         if cur:
-            lines.append(cur)
+            lines.append((cur, cw))
         return lines
 
-    pages, li = [], 0
-    ink = np.zeros((PH, PW), np.float32)
-    paper, _ = draw_paper(kind, rng)
-    truncated = False
+    def place_line(words, cw, li_, mult=1.0, align="l", left=None, av=None, ul=False):
+        nonlocal gi
+        left = lay["left"] if left is None else left
+        av = avail if av is None else av
+        by0 = lay["base"][li_]
+        x = left + {"l": 0, "c": (av - cw) / 2, "r": av - cw}[align] + rng.normal(0, 2 * amp)
+        xs0 = x
+        A, ph, slope, lp = 1.5 * amp, rng.uniform(0, 6.28), rng.normal(0, .004 * amp), rng.normal(0, 1)
+        for wi, word in enumerate(words):
+            if wi:
+                x += xh * mult * wsp * float(np.clip(1 + rng.normal(0, .2 * amp), .5, 1.8))
+            wdy, wang, wpr = rng.normal(0, .05 * xh * amp), rng.normal(0, .6 * amp), rng.normal(0, .04 * amp)
+            ux = None
+            for g, sc, (b_, i_, u_, c_) in word:
+                prog = (x - left) / av
+                drift = A * math.sin(2 * math.pi * prog / 1.3 + ph) + slope * (x - left)
+                sc *= 1 - .035 * max(amp - .6, 0) * prog
+                dy = rng.normal(0, bv * xh * amp * .6) + wdy + drift + lp * .3
+                ang = rng.normal(0, 1.3 * amp) + wang
+                gain = float(np.clip(1 + rng.normal(0, (.06 + pv) * amp) + wpr, .6, 1.25)) * P["gain"]
+                sh = rng.normal(0, .03 * amp) + (.22 if i_ else 0)
+                ddx, ddy, dr, ds = adj.get(str(gi), (0, 0, 0, 1))
+                sc *= ds
+                stamp(ink(c_ or "pen"), g, sc, x + ddx, by0 + dy + ddy, ang + dr, sh, gain, P["blur"], b_)
+                gw = g["a"].shape[1] * sc
+                man.append([gi, round(x + ddx, 1), round(by0 + dy + ddy - g["top"] * sc, 1), round(gw, 1), round(g["a"].shape[0] * sc, 1)])
+                gi += 1
+                if u_ and ux is None:
+                    ux = (x, c_)
+                x += gw + xh * csp * mult * float(np.clip(1 + rng.normal(0, .35 * amp), .1, 2))
+            if ux:
+                hand_line(ink(ux[1] or "pen"), ux[0], by0 + .3 * xh + wdy, x - xh * csp * mult, by0 + .3 * xh + wdy, rng, amp)
+        if ul:
+            hand_line(ink("pen"), xs0, by0 + .45 * xh * mult, x, by0 + .45 * xh * mult, rng, amp)
+
+    def flush():
+        nonlocal pages
+        n, pages = pages, pages + 1
+        data = None
+        if only is None or n in only:
+            r2 = np.random.default_rng([used, n])  # per-page stream: skipping pages never changes other pages
+            paper, _ = draw_paper(kind, r2)
+            data = finish_page(inks, paper, pen, r2, kind)
+        out = (n, data, list(man))
+        inks.clear(); man.clear()
+        return out
+
+    def need(n):  # 0 fits, 1 start new page, 2 page limit reached
+        return 0 if li + n <= nl else (2 if pages + 1 >= MAX_PAGES else 1)
+
     sig = s.get("signature")
     if sig is not None:  # user's own drawn signature, top of page 1
         h0, w0 = sig.shape
         ssc = min(72 / h0, 380 / w0)
         sw_ = w0 * ssc
         sx = {"left": lay["left"], "center": (PW - sw_) / 2}.get(s.get("sig_pos"), PW - 110 - sw_)
-        stamp(ink, dict(a=sig, top=h0 * .72), ssc, sx, 238 if kind == "exam" else lay["top"] - 30,
+        stamp(ink(), dict(a=sig, top=h0 * .72), ssc, sx, 238 if kind == "exam" else lay["top"] - 30,
               float(rng.normal(0, 1.5)), 0.0, P["gain"], P["blur"])
 
-    def flush():
-        nonlocal ink, paper
-        pages.append(finish_page(ink, paper, pen, rng, kind))
-        ink = np.zeros((PH, PW), np.float32)
-        paper, _ = draw_paper(kind, rng)
-
-    for para in text.split("\n"):
-        if truncated:
-            break
-        if not para.strip():
+    rows_in, k, truncated = text.split("\n"), 0, False
+    while k < len(rows_in) and not truncated:
+        body = rows_in[k].strip()
+        if not body:
+            li += 1; k += 1; continue
+        if body.startswith("|"):  # table
+            rows = []
+            while k < len(rows_in) and rows_in[k].strip().startswith("|"):
+                cells = [c.strip() for c in rows_in[k].strip().strip("|").split("|")]
+                k += 1
+                if not all(re.fullmatch(r":?-+:?", c) for c in cells):
+                    rows.append(cells)
+            nc = max([len(r) for r in rows] + [1]); cwd = avail / nc; first = True
+            for r in rows:
+                cl = [wrap(inline(r[j]) if j < len(r) else [], max(cwd - 20, 40)) for j in range(nc)]
+                n = min(max([len(c) for c in cl] + [1]), nl)
+                st_ = need(n)
+                if st_ == 2:
+                    truncated = True; break
+                if st_ == 1:
+                    yield ("page", *flush()); li = 0; first = True
+                yt, yb, xl = lay["ys"][li] - pitch, lay["ys"][li + n - 1], lay["left"]
+                tl = ink()
+                if first:
+                    hand_line(tl, xl, yt, xl + avail, yt, rng, amp)
+                hand_line(tl, xl, yb, xl + avail, yb, rng, amp)
+                for j in range(nc + 1):
+                    hand_line(tl, xl + j * cwd, yt, xl + j * cwd, yb, rng, amp)
+                for j, c in enumerate(cl):
+                    for q, (wds, cwid) in enumerate(c[:n]):
+                        place_line(wds, cwid, li + q, left=xl + j * cwd + 10, av=cwd - 20)
+                li += n; first = False
             li += 1
             continue
-        for line in wrap(para):
-            if li >= len(lay["base"]):
-                flush(); li = 0
-                if len(pages) >= MAX_PAGES:
-                    truncated = True
-                    break
-            by0 = lay["base"][li]
-            x = lay["left"] + rng.normal(0, 2 * amp)
-            A, ph, slope = 1.5 * amp, rng.uniform(0, 6.28), rng.normal(0, .004 * amp)
-            lp = rng.normal(0, 1)
-            for wi, word in enumerate(line):
-                if wi:
-                    x += xh * wsp * float(np.clip(1 + rng.normal(0, .2 * amp), .5, 1.8))
-                wdy, wang, wpr = rng.normal(0, .05 * xh * amp), rng.normal(0, .6 * amp), rng.normal(0, .04 * amp)
-                for g, sc in word:
-                    prog = (x - lay["left"]) / avail
-                    drift = A * math.sin(2 * math.pi * prog / 1.3 + ph) + slope * (x - lay["left"])
-                    sc *= 1 - .035 * max(amp - .6, 0) * prog
-                    dy = rng.normal(0, bv * xh * amp * .6) + wdy + drift + lp * .3
-                    ang = rng.normal(0, 1.3 * amp) + wang
-                    gain = float(np.clip(1 + rng.normal(0, (.06 + pv) * amp) + wpr, .6, 1.25)) * P["gain"]
-                    stamp(ink, g, sc, x, by0 + dy, ang, rng.normal(0, .03 * amp), gain, P["blur"])
-                    x += g["a"].shape[1] * sc + xh * csp * float(np.clip(1 + rng.normal(0, .35 * amp), .1, 2))
+        mult, ul, align, bullet, bold = 1.0, False, "l", False, 0
+        mm = re.match(r"\[(center|right)\] ?", body)
+        if mm:
+            align, body = mm.group(1)[0], body[mm.end():]
+        if body.startswith("## "):
+            mult, bold, body = 1.25, 1, body[3:]
+        elif body.startswith("# "):
+            mult, bold, ul, body = 1.5, 1, True, body[2:]
+        elif body.startswith("- "):
+            bullet, body = True, body[2:]
+        chs = inline(body)
+        if bold:
+            chs = [(c, (1,) + t[1:]) for c, t in chs]
+        ind = 34 if bullet else 0
+        wl, step = wrap(chs, avail - ind, mult), (2 if mult >= 1.5 else 1)
+        if mult >= 1.5 and li > 0:
             li += 1
-    if ink.any() or not pages:
-        flush()
-    pil = [Image.open(io.BytesIO(b)).convert("RGB") for b in pages]
-    pdf = io.BytesIO()
-    pil[0].save(pdf, "PDF", resolution=150, save_all=True, append_images=pil[1:])
-    return dict(pages=pages, pdf=pdf.getvalue(), seed=used, missing=sorted(missing), truncated=truncated)
+        for wi_, (wds, cwid) in enumerate(wl):
+            st_ = need(1)
+            if st_ == 2:
+                truncated = True; break
+            if st_ == 1:
+                yield ("page", *flush()); li = 0
+            if bullet and wi_ == 0:
+                place_line([make_word([("-", NS)])], 8, li, left=lay["left"] + 6, av=24)
+            place_line(wds, cwid, li, mult, align, lay["left"] + ind, avail - ind, ul)
+            li += step
+        k += 1
+    if man or inks or pages == 0:
+        yield ("page", *flush())
+    yield ("done", dict(seed=used, missing=sorted(missing), truncated=truncated))
 
 
 # ---- free-paper calibration: any plain paper, user copies PROMPT lines ----
@@ -479,6 +609,7 @@ PROMPT = [
     "ABCDEFGHIJKLM NOPQRSTUVWXYZ",
     "0123456789 (2026) $5 & 40%",
     "Yes: a-b; it's 3+4=7, 50/50 @ noon?",
+    "He said it's #1 [a] {b} <c> 5*2 a_b ~ ^ \\ |",
 ]
 ONBASE = set("abcdehiklmnorstuvwxzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 

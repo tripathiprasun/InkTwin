@@ -61,3 +61,5 @@ details.cheat{margin:10px 0;font-size:13px}.cheat pre{white-space:pre-wrap;backg
 #adj{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 14px;padding:10px;background:var(--card);border:1px solid var(--line);border-radius:6px}
 #adj button{padding:7px 12px;font-size:14px}#adj .small{flex-basis:100%}
 button.on{background:var(--ink);color:#fff}
+
+[hidden]{display:none!important}

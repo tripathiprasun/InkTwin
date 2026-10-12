@@ -264,11 +264,10 @@ def draw_paper(kind, rng):
         d.text((130, 175), "Class", fill=(110, 110, 110), font=f)
         d.line([(210, 200), (700, 200)], fill=(110, 110, 110))
     a = np.asarray(im, np.float32)
-    n = cv2.GaussianBlur(rng.normal(0, 1, (PH, PW)).astype(np.float32), (0, 0), 1.1)
+    n = cv2.GaussianBlur(rng.standard_normal((PH, PW), dtype=np.float32), (0, 0), 1.1)
     n /= n.std() + 1e-6
     lf = cv2.resize(rng.normal(0, 1, (9, 7)).astype(np.float32), (PW, PH), interpolation=cv2.INTER_CUBIC)
-    yy, xx = np.mgrid[0:PH, 0:PW].astype(np.float32)
-    vig = 1 - 0.07 * ((xx / PW - .5) ** 2 + (yy / PH - .5) ** 2)
+    vig = _vig()
     return a * (1 + 0.018 * n + 0.012 * lf)[..., None] * vig[..., None], L
 
 
@@ -290,6 +289,20 @@ def load_signature(v):
 
 
 # ---- rendering: styled layout, ink layers, page realism ----
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
+def _vig():
+    yy, xx = np.mgrid[0:PH, 0:PW].astype(np.float32)
+    return 1 - 0.07 * ((xx / PW - .5) ** 2 + (yy / PH - .5) ** 2)
+
+
+@lru_cache(maxsize=1)
+def _mesh():
+    return np.meshgrid(np.arange(PW, dtype=np.float32), np.arange(PH, dtype=np.float32))
+
+
 PALETTE = dict(r=(196, 32, 44), b=(30, 60, 175), g=(22, 120, 70), k=(16, 16, 22))
 SUBS = {"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "\u2013": "-", "\u2014": "-", "\u2026": "..."}
 TOKC = re.compile(r"\{\{([rbgk])\|")
@@ -300,10 +313,10 @@ def finish_page(inks, paper, pen, rng, kind=""):
     lf = 0.9 + 0.12 * cv2.resize(rng.random((12, 9)).astype(np.float32), (PW, PH), interpolation=cv2.INTER_CUBIC)
     gr = sk = None
     if pen == "pencil":
-        gr = cv2.GaussianBlur(rng.random((PH, PW)).astype(np.float32), (0, 0), 0.7)
+        gr = cv2.GaussianBlur(rng.random((PH, PW), dtype=np.float32), (0, 0), 0.7)
         gr = (gr - gr.min()) / (np.ptp(gr) + 1e-6)
     if pen == "ballpoint":  # faint skipping
-        sk = cv2.GaussianBlur(rng.random((PH, PW)).astype(np.float32), (0, 0), 2)
+        sk = cv2.GaussianBlur(rng.random((PH, PW), dtype=np.float32), (0, 0), 2)
         sk = np.where((sk - sk.mean()) / sk.std() > 1.9, 0.6, 1.0).astype(np.float32)
     out = paper
     for name, ink in inks.items():  # one layer per ink colour, multiplied onto the paper
@@ -322,11 +335,11 @@ def finish_page(inks, paper, pen, rng, kind=""):
     out = out * 1.05 * (1 + 0.07 * ((xs - .5) * math.cos(th) + (yv - .5) * math.sin(th))) * (1 - 0.13 * np.exp(-xs / 0.06))
     if kind == "classmate":
         out = out * (1 - 0.06 * cv2.GaussianBlur(back[:, ::-1].copy(), (0, 0), 2.2)[..., None])
-    gx, gy = np.meshgrid(np.arange(PW, dtype=np.float32), np.arange(PH, dtype=np.float32))
+    gx, gy = _mesh()
     ph = rng.uniform(0, 6.28)
     out = cv2.remap(out.astype(np.float32), gx + 2.0 * np.sin(gy / PH * 3 + ph), gy + 3.0 * np.sin(gx / PW * 3.1 + ph),
                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    out = cv2.GaussianBlur(out, (0, 0), 0.45) + rng.normal(0, 1.2, (PH, PW, 1)).astype(np.float32)
+    out = cv2.GaussianBlur(out, (0, 0), 0.45) + rng.standard_normal((PH, PW, 1), dtype=np.float32) * 1.2
     buf = io.BytesIO()
     Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).save(buf, "JPEG", quality=90)
     return buf.getvalue()
@@ -396,7 +409,8 @@ def generate(profile, text, s):
     pv = min(float(profile.get("pressure_var", .1)), .25)
     wsp, csp = float(profile.get("word_spacing", .75)), float(profile.get("char_spacing", .14))
     avail = lay["right"] - lay["left"]
-    only, adj = s.get("only"), s.get("adjust") or {}
+    only, adj, frm = s.get("only"), s.get("adjust") or {}, s.get("from")
+    yield ("seed", used)  # lets a client resume the exact same document after a dropped connection
     missing, last, inks, man = set(), {}, {}, []
     pages = gi = li = 0
     NS = (0, 0, 0, None)
@@ -512,7 +526,7 @@ def generate(profile, text, s):
         nonlocal pages
         n, pages = pages, pages + 1
         data = None
-        if only is None or n in only:
+        if (only is None or n in only) and (frm is None or n >= frm):
             r2 = np.random.default_rng([used, n])  # per-page stream: skipping pages never changes other pages
             paper, _ = draw_paper(kind, r2)
             data = finish_page(inks, paper, pen, r2, kind)

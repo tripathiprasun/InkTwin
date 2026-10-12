@@ -1,4 +1,4 @@
-import os, io, json, base64, itertools
+import os, io, json, base64, itertools, queue, threading
 from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 import engine
@@ -8,6 +8,7 @@ app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_REQUEST_MB", "40")) * 1024
 CORS(app, origins=[o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")])
 MAX_FILE = int(os.getenv("MAX_FILE_MB", "12")) * 1024 * 1024
 MAX_TEXT = int(os.getenv("MAX_TEXT", "60000"))
+GEN = threading.Semaphore(1)  # one document at a time keeps memory bounded on small instances
 
 
 def err(msg, code=400):
@@ -105,24 +106,64 @@ def generate():
         signature=engine.load_signature(s.get("signature")),
         sig_pos=s.get("sig_pos") if s.get("sig_pos") in ("left", "center", "right") else "right",
         adjust=clean_adjust(s.get("adjust")),
-        only={i for i in only if isinstance(i, int)} if isinstance(only, list) else None)
+        only={i for i in only if isinstance(i, int)} if isinstance(only, list) else None,
+        **{"from": s["from"] if isinstance(s.get("from"), int) and s["from"] >= 0 else None})
+    if not GEN.acquire(timeout=30):
+        return err("The server is busy finishing another document. Try again in a moment.", 503)
     try:
         it = engine.generate(prof, text, clean)
         first = next(it)  # surfaces an invalid profile before streaming starts
     except (KeyError, ValueError, TypeError, StopIteration):
+        GEN.release()
         return err("Invalid handwriting profile. Rebuild it from a sample.")
+    except BaseException:
+        GEN.release()
+        raise
+
+    def line(item):
+        if item[0] == "seed":
+            return dict(seed=item[1])
+        if item[0] == "page":
+            _, n, data, man = item
+            return dict(n=n, img=base64.b64encode(data).decode() if data else None, glyphs=man)
+        return dict(done=True, **item[1])
 
     def stream():
+        q, stop = queue.Queue(maxsize=2), threading.Event()
+
+        def put(x):
+            while not stop.is_set():
+                try:
+                    q.put(x, timeout=1); return
+                except queue.Full:
+                    pass
+
+        def work():  # renders in a thread so the response can send keep-alive newlines meanwhile
+            try:
+                for item in itertools.chain([first], it):
+                    put(item)
+                    if stop.is_set():
+                        return
+                put(None)
+            except Exception:
+                app.logger.exception("generate failed"); put("error")
+            finally:
+                GEN.release()
+
+        threading.Thread(target=work, daemon=True).start()
         try:
-            for item in itertools.chain([first], it):
-                if item[0] == "page":
-                    _, n, data, man = item
-                    yield json.dumps(dict(n=n, img=base64.b64encode(data).decode() if data else None, glyphs=man)) + "\n"
-                else:
-                    yield json.dumps(dict(done=True, **item[1])) + "\n"
-        except Exception:
-            app.logger.exception("generate failed")
-            yield json.dumps(dict(error="Generation failed on the server.")) + "\n"
+            while True:
+                try:
+                    item = q.get(timeout=10)
+                except queue.Empty:
+                    yield "\n"; continue
+                if item is None:
+                    break
+                if item == "error":
+                    yield json.dumps(dict(error="Generation failed on the server.")) + "\n"; break
+                yield json.dumps(line(item)) + "\n"
+        finally:
+            stop.set()
 
     return Response(stream_with_context(stream()), mimetype="application/x-ndjson",
                     headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})

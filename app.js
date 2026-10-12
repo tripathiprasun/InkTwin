@@ -94,27 +94,41 @@ async function run(opts = {}) {
   if (state.busy || !state.profile) return;
   const text = $("text").value; if (!text.trim()) return done("Type some text first.", "err");
   const fresh = !opts.only;
-  if (fresh) { state.adjust = {}; state.sel.clear(); state.dirty.clear(); state.pages = []; $("pages").innerHTML = ""; }
+  if (fresh) { state.adjust = {}; state.sel.clear(); state.dirty.clear(); state.pages = []; state.seed = null; $("pages").innerHTML = ""; }
   state.busy = true; $("gen").disabled = $("regen").disabled = true;
-  const body = { profile: state.profile, text, settings: { ...settings(), seed: fresh ? ($("seed").value.trim() || null) : state.seed, adjust: state.adjust, only: opts.only || null } };
-  status(opts.only ? "Updating page…" : "Generating…", "busy");
-  try {
-    let res; try { res = await fetch(API + "/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); }
-    catch { throw new Error("Can't reach the server. It may be waking up — wait 30 seconds and retry."); }
-    if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || `Request failed (${res.status})`); }
-    const rd = res.body.getReader(), dec = new TextDecoder(); let buf = "", meta = null;
-    for (;;) { const { value, done: dn } = await rd.read(); if (dn) break; buf += dec.decode(value, { stream: true });
-      let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line.trim()) continue;
-        const m = JSON.parse(line); if (m.error) throw new Error(m.error);
-        if (m.done) { meta = m; continue; }
-        const el = pageEl(m.n); const pg = (state.pages[m.n] ||= {});
-        if (m.img) { pg.img = m.img; el.firstChild.src = "data:image/jpeg;base64," + m.img; }
-        pg.glyphs = m.glyphs; $("editorBox").hidden = true; $("result").hidden = false; applyZoom(); drawSel();
-        if (!opts.only) status(`Writing page ${m.n + 1}…`, "busy"); } }
-    if (meta) { state.seed = meta.seed; let t = `Complete — ${state.pages.length} page${state.pages.length > 1 ? "s" : ""}`;
-      if (meta.missing.length) t += `, skipped unsupported characters: ${meta.missing.join(" ")}`;
-      if (meta.truncated) t += " — stopped at the page limit"; done(t, "ok"); }
-  } catch (e) { done(e.message, "err"); }
+  const st0 = { ...settings(), adjust: state.adjust, only: opts.only || null };
+  const fatal = (msg) => Object.assign(new Error(msg), { fatal: true });
+  let meta = null, tries = 0; status(opts.only ? "Updating page…" : "Generating…", "busy");
+  while (!meta) {
+    const ctl = new AbortController(); let wd; const arm = () => { clearTimeout(wd); wd = setTimeout(() => ctl.abort(), 45000); };
+    try {
+      const seed = fresh ? (state.seed ?? ($("seed").value.trim() || null)) : state.seed;
+      const from = fresh && state.pages.length ? state.pages.length : null; // resume after a dropped connection
+      arm();
+      const res = await fetch(API + "/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, signal: ctl.signal,
+        body: JSON.stringify({ profile: state.profile, text, settings: { ...st0, seed, from } }) });
+      if (!res.ok) { const j = await res.json().catch(() => ({})); throw fatal(j.error || `Request failed (${res.status})`); }
+      const rd = res.body.getReader(), dec = new TextDecoder(); let buf = "";
+      for (;;) { const { value, done: dn } = await rd.read(); if (dn) break; arm(); buf += dec.decode(value, { stream: true });
+        let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line.trim()) continue;
+          const m = JSON.parse(line); if (m.error) throw fatal(m.error);
+          if (m.done) { meta = m; continue; }
+          if (Object.keys(m).length === 1 && "seed" in m) { state.seed = m.seed; continue; }
+          if (typeof m.n !== "number") throw fatal("The server is running an older version of InkTwin. Redeploy the backend (backend/app.py and backend/engine.py) on Render.");
+          const el = pageEl(m.n), pg = (state.pages[m.n] ||= {});
+          if (m.img) { pg.img = m.img; el.firstChild.src = "data:image/jpeg;base64," + m.img; }
+          pg.glyphs = m.glyphs; $("editorBox").hidden = true; $("result").hidden = false; applyZoom(); drawSel();
+          if (!opts.only) status(`Writing page ${m.n + 1}…`, "busy"); } }
+      if (!meta) throw new Error("stream ended early");
+    } catch (e) {
+      if (e.fatal) { done(e.message, "err"); break; }
+      if (opts.only || ++tries > 8 || !state.seed) { done("Lost connection to the server. Wait a moment and press Regenerate.", "err"); break; }
+      status(`Connection dropped — resuming at page ${state.pages.length + 1}…`, "busy"); await new Promise((r) => setTimeout(r, 2500));
+    } finally { clearTimeout(wd); }
+  }
+  if (meta) { state.seed = meta.seed; let t = `Complete — ${state.pages.length} page${state.pages.length > 1 ? "s" : ""}`;
+    if (meta.missing.length) t += `, skipped unsupported characters: ${meta.missing.join(" ")}`;
+    if (meta.truncated) t += " — stopped at the page limit"; done(t, "ok"); }
   state.busy = false; $("gen").disabled = $("regen").disabled = false;
 }
 $("gen").onclick = () => run(); $("regen").onclick = () => run();

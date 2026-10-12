@@ -16,7 +16,7 @@ cd frontend && python -m http.server 8000              # http://localhost:8000
 Open http://localhost:8000, download the sheet, print it, fill it in, photograph/scan it, upload. The frontend defaults to `http://localhost:5000`.
 
 ## Deploy
-**Backend (Render):** New → Web Service → connect repo. Root directory `backend`; build `pip install -r requirements.txt`; start `gunicorn app:app --workers 1 --timeout 600`. Set env `ALLOWED_ORIGINS=https://YOUR_USER.github.io`. (Free instances sleep; first request may be slow. Keep workers at 1 for 512 MB RAM.)
+**Backend (Render):** New → Web Service → connect repo. Root directory `backend`; build `pip install -r requirements.txt`; start `gunicorn app:app --worker-class gthread --workers 1 --threads 4 --timeout 120`. Set env `ALLOWED_ORIGINS=https://YOUR_USER.github.io`. (Free instances sleep; first request may be slow. Keep workers at 1 for 512 MB RAM.)
 
 **Frontend (GitHub Pages):** In `frontend/index.html`, add before `app.js`:
 `<script>window.INKTWIN_API_BASE="https://YOUR-SERVICE.onrender.com"</script>`.
@@ -67,8 +67,10 @@ Paper `classmate`: cool-white page, blue rules, double red margin. Every page al
 - Calibration: the printable sheet is the default tab; "Any paper" is the alternative.
 
 ## Limits, formatting, letter editing (latest)
-- Limits (env, see `.env.example`): `MAX_TEXT` default 60,000 characters, `MAX_PAGES` default 30. Use start command `gunicorn app:app --workers 1 --timeout 600`.
+- Limits (env, see `.env.example`): `MAX_TEXT` default 60,000 characters, `MAX_PAGES` default 30. Use start command `gunicorn app:app --worker-class gthread --workers 1 --threads 4 --timeout 120`.
 - `POST /api/generate` now streams NDJSON: one line per page `{n, img (base64 JPEG or null), glyphs}` then `{done, seed, missing, truncated}`. Pages appear as they finish; PDF/PNG/scan are built in the browser, so there is no page cap beyond `MAX_PAGES`.
 - `glyphs` is `[[id, x, y, w, h], ...]` in page pixels (1240x1754). Send back `settings.seed` (from `done`), `settings.adjust` = `{id: [dx, dy, rotDeg, scale]}` and `settings.only` = `[pageIndex]` to re-render just those pages with letters moved; the layout is deterministic for a given seed.
 - Calibration sheet covers all 94 printable keyboard characters (5 groups x 19 rows, A4 ratio). Old 4-column sheets are not compatible.
 - Text markup: `# Heading`, `## Subheading`, `**bold**`, `//italic//`, `__underline__`, `{{r|red}}` (r b g k), `- bullet`, `[center] `, `[right] `, tables as `|a|b|` lines. Escape with a backslash.
+
+- Long documents: generation runs in a worker thread with keep-alive newlines every 10 s; use the gthread start command so long streams are never killed by the gunicorn timeout. If a connection still drops, the browser resumes automatically (`settings.from` + the seed) and renders only the missing pages.

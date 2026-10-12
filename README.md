@@ -74,3 +74,7 @@ Paper `classmate`: cool-white page, blue rules, double red margin. Every page al
 - Text markup: `# Heading`, `## Subheading`, `**bold**`, `//italic//`, `__underline__`, `{{r|red}}` (r b g k), `- bullet`, `[center] `, `[right] `, tables as `|a|b|` lines. Escape with a backslash.
 
 - Long documents: generation runs in a worker thread with keep-alive newlines every 10 s; use the gthread start command so long streams are never killed by the gunicorn timeout. If a connection still drops, the browser resumes automatically (`settings.from` + the seed) and renders only the missing pages.
+
+## Advanced letter editor
+Edit mode ("Edit letters"): click a letter (or Word mode / double-click for a word), drag to move, drag the round handles to rotate or resize, drag on empty paper to box-select, "Style" cycles your other captured versions of a letter, type to replace letters, Ctrl+Z / Ctrl+Shift+Z undo-redo, "Hold to compare" shows the untouched original. Moves show an instant ghost preview, then only the touched pages re-render; downloads always flush pending edits first.
+API: `settings.adjust = {glyphId: [dx, dy, rotationClockwiseDeg, scale, variantIndexOr-1, replacementChar]}`; manifest entries are `[id, x, y, w, h, char, wordId, variantIndex, variantCount]`. Edits never change the advance of other letters, so layout stays stable for a given seed.

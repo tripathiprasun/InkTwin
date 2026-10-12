@@ -76,11 +76,14 @@ def clean_adjust(raw):
     if isinstance(raw, dict):
         for k, v in list(raw.items())[:8000]:
             try:
-                dx, dy, dr, ds = (float(x) for x in v)
+                dx, dy, dr, ds = (float(x) for x in v[:4])
+                av = int(v[4]) if len(v) > 4 and isinstance(v[4], (int, float)) else -1
+                ac = v[5] if len(v) > 5 and isinstance(v[5], str) and len(v[5]) == 1 and v[5] in engine.CHARSET else ""
             except Exception:
                 continue
             if str(k).isdigit():
-                out[str(k)] = (max(-80, min(80, dx)), max(-80, min(80, dy)), max(-30, min(30, dr)), max(.5, min(2., ds)))
+                out[str(k)] = (max(-400, min(400, dx)), max(-400, min(400, dy)), max(-180, min(180, dr)),
+                               max(.3, min(3., ds)), max(-1, min(99, av)), ac)
     return out
 
 

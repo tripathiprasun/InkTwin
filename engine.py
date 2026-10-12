@@ -412,7 +412,7 @@ def generate(profile, text, s):
     only, adj, frm = s.get("only"), s.get("adjust") or {}, s.get("from")
     yield ("seed", used)  # lets a client resume the exact same document after a dropped connection
     missing, last, inks, man = set(), {}, {}, []
-    pages = gi = li = 0
+    pages = gi = li = wg = 0
     NS = (0, 0, 0, None)
 
     text = text.replace("\r", "").expandtabs(4)
@@ -443,15 +443,16 @@ def generate(profile, text, s):
                 if not ch.isspace():
                     missing.add(ch)
                 continue
-            g = lst[pick(ch, len(lst))]
+            vi = pick(ch, len(lst))
+            g = lst[vi]
             sc = s0 * mult * float(np.clip(1 + rng.normal(0, sv * amp * .6), .8, 1.25))
             if rng.random() < .04 * amp:
                 sc *= 1 + rng.normal(0, .08)
-            ins.append((g, sc, st))
+            ins.append((g, sc, st, ch, vi))
         return ins
 
     def wwidth(ins, mult):
-        return sum(g["a"].shape[1] * sc + xh * csp * mult for g, sc, _ in ins)
+        return sum(g["a"].shape[1] * sc + xh * csp * mult for g, sc, *_ in ins)
 
     def words_of(chs):
         out, cur = [], []
@@ -488,7 +489,7 @@ def generate(profile, text, s):
         return lines
 
     def place_line(words, cw, li_, mult=1.0, align="l", left=None, av=None, ul=False):
-        nonlocal gi
+        nonlocal gi, wg
         left = lay["left"] if left is None else left
         av = avail if av is None else av
         by0 = lay["base"][li_]
@@ -500,7 +501,8 @@ def generate(profile, text, s):
                 x += xh * mult * wsp * float(np.clip(1 + rng.normal(0, .2 * amp), .5, 1.8))
             wdy, wang, wpr = rng.normal(0, .05 * xh * amp), rng.normal(0, .6 * amp), rng.normal(0, .04 * amp)
             ux = None
-            for g, sc, (b_, i_, u_, c_) in word:
+            wg += 1
+            for g, sc, (b_, i_, u_, c_), ch0, vi0 in word:
                 prog = (x - left) / av
                 drift = A * math.sin(2 * math.pi * prog / 1.3 + ph) + slope * (x - left)
                 sc *= 1 - .035 * max(amp - .6, 0) * prog
@@ -508,11 +510,21 @@ def generate(profile, text, s):
                 ang = rng.normal(0, 1.3 * amp) + wang
                 gain = float(np.clip(1 + rng.normal(0, (.06 + pv) * amp) + wpr, .6, 1.25)) * P["gain"]
                 sh = rng.normal(0, .03 * amp) + (.22 if i_ else 0)
-                ddx, ddy, dr, ds = adj.get(str(gi), (0, 0, 0, 1))
-                sc *= ds
-                stamp(ink(c_ or "pen"), g, sc, x + ddx, by0 + dy + ddy, ang + dr, sh, gain, P["blur"], b_)
-                gw = g["a"].shape[1] * sc
-                man.append([gi, round(x + ddx, 1), round(by0 + dy + ddy - g["top"] * sc, 1), round(gw, 1), round(g["a"].shape[0] * sc, 1)])
+                # manual edit: [dx, dy, rotation (clockwise deg), scale, variant (-1 = as generated), replacement char ("" = none)]
+                ddx, ddy, dr, ds, av_, ac_ = adj.get(str(gi), (0, 0, 0, 1, -1, ""))
+                ch1, vi1 = ac_ or ch0, vi0
+                lst = gl.get(ch1) or gl.get(ch1.swapcase()) or [g]
+                gg = g
+                if ac_ or av_ >= 0:
+                    vi1 = (av_ if av_ >= 0 else (vi0 if ch1 == ch0 else 0)) % len(lst)
+                    gg = lst[vi1]
+                gw = g["a"].shape[1] * sc  # advance uses the generated glyph, so edits never push other letters around
+                gw0, gh0, t0 = gg["a"].shape[1] * sc, gg["a"].shape[0] * sc, gg["top"] * sc
+                th, dyc = math.radians(-dr), (gh0 / 2 - t0) * ds  # scale and rotate about the glyph's centre
+                xn = x + ddx - gw0 * (ds - 1) / 2  # un-rotated box, centred on the glyph's visual centre
+                yn = by0 + dy + ddy + (ds - 1) * (t0 - gh0 / 2)
+                stamp(ink(c_ or "pen"), gg, sc * ds, xn - dyc * math.sin(th), yn + dyc * (1 - math.cos(th)), ang - dr, sh, gain, P["blur"], b_)
+                man.append([gi, round(xn, 1), round(yn - gg["top"] * sc * ds, 1), round(gw0 * ds, 1), round(gh0 * ds, 1), ch1, wg, vi1, len(lst)])
                 gi += 1
                 if u_ and ux is None:
                     ux = (x, c_)

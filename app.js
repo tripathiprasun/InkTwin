@@ -88,13 +88,13 @@ function settings() { return { variation: $("variation").value / 100, mood: stat
   signature: state.sig, sig_pos: $("sigpos").value }; }
 function pageEl(n) { const box = $("pages");
   while (box.children.length <= n) { const d = document.createElement("div"); d.className = "pg"; d.dataset.n = box.children.length;
-    d.innerHTML = '<img alt=""><div class="sel"></div>'; d.firstChild.alt = `Page ${box.children.length + 1}`; box.appendChild(d); }
+    d.innerHTML = '<img alt="" draggable="false"><div class="sel"></div>'; d.firstChild.alt = `Page ${box.children.length + 1}`; box.appendChild(d); }
   return box.children[n]; }
 async function run(opts = {}) {
   if (state.busy || !state.profile) return;
   const text = $("text").value; if (!text.trim()) return done("Type some text first.", "err");
   const fresh = !opts.only;
-  if (fresh) { state.adjust = {}; state.sel.clear(); state.dirty.clear(); state.pages = []; state.seed = null; $("pages").innerHTML = ""; }
+  if (fresh) { state.hist = []; state.redo = []; state.selPage = null; updUndo(); updInsp(); state.adjust = {}; state.sel.clear(); state.dirty.clear(); state.pages = []; state.seed = null; $("pages").innerHTML = ""; }
   state.busy = true; $("gen").disabled = $("regen").disabled = true;
   const st0 = { ...settings(), adjust: state.adjust, only: opts.only || null };
   const fatal = (msg) => Object.assign(new Error(msg), { fatal: true });
@@ -116,7 +116,7 @@ async function run(opts = {}) {
           if (Object.keys(m).length === 1 && "seed" in m) { state.seed = m.seed; continue; }
           if (typeof m.n !== "number") throw fatal("The server is running an older version of InkTwin. Redeploy the backend (backend/app.py and backend/engine.py) on Render.");
           const el = pageEl(m.n), pg = (state.pages[m.n] ||= {});
-          if (m.img) { pg.img = m.img; el.firstChild.src = "data:image/jpeg;base64," + m.img; }
+          if (m.img) { pg.img = m.img; if (fresh) pg.base = m.img; el.firstChild.src = "data:image/jpeg;base64," + m.img; el.style.setProperty("--pg", `url(data:image/jpeg;base64,${m.img})`); }
           pg.glyphs = m.glyphs; $("editorBox").hidden = true; $("result").hidden = false; applyZoom(); drawSel();
           if (!opts.only) status(`Writing page ${m.n + 1}…`, "busy"); } }
       if (!meta) throw new Error("stream ended early");
@@ -139,50 +139,126 @@ $("mood").onclick = (e) => { const b = e.target.closest("button"); if (!b) retur
 function applyZoom() { for (const el of $("pages").children) el.style.width = $("zoom").value + "%"; }
 $("zoom").oninput = applyZoom;
 
-// ---- letter editor: select glyphs, nudge, re-render only the touched pages ----
+// ---- advanced letter editor: click / drag / rotate / resize / replace, undo-redo, live ghost preview ----
+const Q = { ID: 0, X: 1, Y: 2, W: 3, H: 4, CH: 5, WORD: 6, VI: 7, NV: 8 };
+Object.assign(state, { hist: [], redo: [], gran: "letter", selPage: null, lastT: 0 });
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function gmap() { const m = new Map(); state.pages.forEach((pg, n) => (pg.glyphs || []).forEach((q) => m.set(q[Q.ID], { q, n }))); return m; }
+function selGlyphs() { const m = gmap(); return [...state.sel].map((id) => m.get(id)).filter(Boolean).sort((a, b) => a.q[0] - b.q[0]); }
+function centroid(gs) { let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const { q } of gs) { x0 = Math.min(x0, q[1]); y0 = Math.min(y0, q[2]); x1 = Math.max(x1, q[1] + q[3]); y1 = Math.max(y1, q[2] + q[4]); }
+  return [(x0 + x1) / 2, (y0 + y1) / 2]; }
+function newCenter(q, T) { const vx = q[1] + q[3] / 2 - T.cx, vy = q[2] + q[4] / 2 - T.cy, r = T.rot * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+  return [T.cx + T.sc * (vx * c - vy * s) + T.dx, T.cy + T.sc * (vx * s + vy * c) + T.dy]; }
+const box = (x, y, w, h, cls, extra = "") => `<i class="${cls}" style="left:${x / PW * 100}%;top:${y / PH * 100}%;width:${w / PW * 100}%;height:${h / PH * 100}%;${extra}"></i>`;
+function drawSel(T) {
+  const gs = selGlyphs();
+  [...$("pages").children].forEach((el, n) => {
+    const L = el.lastChild; L.innerHTML = ""; if (state.selPage !== n) return;
+    const mine = gs.filter((g) => g.n === n); if (!mine.length) return;
+    const [cx, cy] = centroid(mine), Tm = T && { cx, cy, ...T };
+    let h = "", x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (const { q } of mine) { let x = q[1], y = q[2], w = q[3], hh = q[4];
+      if (Tm) { h += box(x, y, w, hh, "hole"); const [nx, ny] = newCenter(q, Tm); w *= Tm.sc; hh *= Tm.sc; x = nx - w / 2; y = ny - hh / 2;
+        h += box(x, y, w, hh, "gh", `background-size:${PW / q[3] * 100}% ${PH / q[4] * 100}%;background-position:${q[1] / (PW - q[3]) * 100}% ${q[2] / (PH - q[4]) * 100}%;transform:rotate(${Tm.rot}deg)`); }
+      h += box(x, y, w, hh, "box"); x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + hh); }
+    h += box(x0, y0, x1 - x0, y1 - y0, "grp");
+    h += `<b class="hnd rot" data-h="rot" style="left:${(x0 + x1) / 2 / PW * 100}%;top:${y0 / PH * 100}%;margin-top:-20px"></b><b class="hnd size" data-h="size" style="left:${x1 / PW * 100}%;top:${y1 / PH * 100}%"></b>`;
+    L.innerHTML = h; }); }
+function updInsp() { const gs = selGlyphs(); $("insp").hidden = !gs.length; if (!gs.length) return;
+  $("selinfo").textContent = gs.length === 1 ? `“${gs[0].q[Q.CH]}” · style ${gs[0].q[Q.VI] + 1}/${gs[0].q[Q.NV]}` : `${gs.length} letters: “${gs.map((g) => g.q[Q.CH]).join("").slice(0, 24)}”`;
+  $("repl").value = ""; $("repl").placeholder = gs.length === 1 ? "Replace with…" : `Type ${gs.length} characters…`; }
+function updUndo() { $("undo").disabled = !state.hist.length; $("redo").disabled = !state.redo.length;
+  const n = Object.keys(state.adjust).length; $("adjinfo").textContent = n ? `${n} letter${n > 1 ? "s" : ""} edited` : "No edits yet"; }
+function pushHist(coalesce) { const now = Date.now();
+  if (!(coalesce && now - state.lastT < 800)) { state.hist.push(clone(state.adjust)); if (state.hist.length > 200) state.hist.shift(); state.redo = []; } state.lastT = now; }
+const ensure = (id) => state.adjust[id] || (state.adjust[id] = [0, 0, 0, 1, -1, ""]);
+function schedule(ms = 450) { clearTimeout(state.adjT); state.adjT = setTimeout(applyAdjust, ms); }
+function after() { updUndo(); drawSel(); updInsp(); schedule(); }
+function markPages(ids) { const m = gmap(); ids.forEach((id) => { const g = m.get(+id); if (g) state.dirty.add(g.n); }); }
+async function applyAdjust() { if (state.busy) { schedule(300); return; } const only = [...state.dirty]; state.dirty.clear(); if (only.length) { await run({ only }); updInsp(); } }
+async function flushEdits() { clearTimeout(state.adjT); while (state.busy) await sleep(150); const only = [...state.dirty]; state.dirty.clear(); if (only.length) await run({ only }); }
+function commitT(T, coalesce) {
+  const gs = selGlyphs(); if (!gs.length) return done("Click a letter first.", "err");
+  pushHist(coalesce); const [cx, cy] = centroid(gs), Tm = { cx, cy, ...T };
+  for (const { q, n } of gs) { const [nx, ny] = newCenter(q, Tm), a = ensure(q[0]);
+    a[0] += nx - (q[1] + q[3] / 2); a[1] += ny - (q[2] + q[4] / 2); a[2] += T.rot; a[3] *= T.sc;
+    q[3] *= T.sc; q[4] *= T.sc; q[1] = nx - q[3] / 2; q[2] = ny - q[4] / 2; state.dirty.add(n); }
+  after(); }
+function undoRedo(from, to) { if (!state[from].length) return; state[to].push(clone(state.adjust)); const prev = state[from].pop();
+  const ids = new Set([...Object.keys(state.adjust), ...Object.keys(prev)].filter((k) => JSON.stringify(state.adjust[k]) !== JSON.stringify(prev[k])));
+  state.adjust = prev; markPages(ids); updUndo(); schedule(120); }
+$("undo").onclick = () => undoRedo("hist", "redo"); $("redo").onclick = () => undoRedo("redo", "hist");
+function cycle(d) { const gs = selGlyphs(); if (!gs.length) return; pushHist();
+  for (const { q, n } of gs) { if (q[Q.NV] < 2) continue; const a = ensure(q[0]); a[4] = (q[Q.VI] + d + q[Q.NV]) % q[Q.NV]; q[Q.VI] = a[4]; state.dirty.add(n); } after(); }
+$("varprev").onclick = () => cycle(-1); $("varnext").onclick = () => cycle(1);
+$("repl").onchange = () => { const gs = selGlyphs(), t = [...$("repl").value]; if (!gs.length || !t.length) return;
+  if (t.length !== gs.length || t.some((c) => !CHARS.includes(c))) return done(`Type exactly ${gs.length} supported character${gs.length > 1 ? "s" : ""}.`, "err");
+  pushHist(); gs.forEach(({ q, n }, i) => { const a = ensure(q[0]); a[5] = t[i]; a[4] = -1; q[Q.CH] = t[i]; state.dirty.add(n); }); after(); };
+$("resetsel").onclick = () => { const gs = selGlyphs(); if (!gs.some(({ q }) => state.adjust[q[0]])) return; pushHist();
+  gs.forEach(({ q, n }) => { delete state.adjust[q[0]]; state.dirty.add(n); }); after(); };
+$("adjall").onclick = () => { if (!Object.keys(state.adjust).length) return; pushHist(); markPages(Object.keys(state.adjust)); state.adjust = {}; after(); };
+$("insp").onclick = (e) => { const b = e.target.closest("button[data-a]"); if (!b) return; const [dx, dy, rot, sc] = b.dataset.a.split(",").map(Number); commitT({ dx, dy, rot, sc }, true); };
+$("gran").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; state.gran = b.dataset.g; document.querySelectorAll("#gran button").forEach((x) => x.classList.toggle("on", x === b)); };
+const cmp = (on) => [...$("pages").children].forEach((el, n) => { const pg = state.pages[n]; if (pg && pg.img) el.firstChild.src = "data:image/jpeg;base64," + (on && pg.base ? pg.base : pg.img); });
+$("cmp").onpointerdown = () => cmp(true); ["pointerup", "pointerleave", "pointercancel"].forEach((ev) => $("cmp").addEventListener(ev, () => cmp(false)));
 $("adjmode").onclick = () => { state.adjOn = !state.adjOn; $("pages").classList.toggle("adj", state.adjOn); $("adj").hidden = !state.adjOn;
-  $("adjmode").classList.toggle("on", state.adjOn); if (!state.adjOn) { state.sel.clear(); drawSel(); } };
-function drawSel() { [...$("pages").children].forEach((el, n) => { const g = (state.pages[n] || {}).glyphs || [];
-  el.lastChild.innerHTML = g.filter((q) => state.sel.has(q[0])).map((q) =>
-    `<i style="left:${q[1] / PW * 100}%;top:${q[2] / PH * 100}%;width:${q[3] / PW * 100}%;height:${q[4] / PH * 100}%"></i>`).join(""); }); }
-let drag = null;
+  $("adjmode").classList.toggle("on", state.adjOn); if (!state.adjOn) { state.sel.clear(); drawSel(); updInsp(); } };
+
+function hitTest(n, p) { let best = null, ba = 1e12;
+  for (const q of (state.pages[n] || {}).glyphs || []) if (p[0] >= q[1] - 3 && p[0] <= q[1] + q[3] + 3 && p[1] >= q[2] - 3 && p[1] <= q[2] + q[4] + 3 && q[3] * q[4] < ba) { best = q; ba = q[3] * q[4]; }
+  return best; }
+const wordIds = (n, q) => state.pages[n].glyphs.filter((g) => g[Q.WORD] === q[Q.WORD]).map((g) => g[0]);
 const ptr = (e, r) => [(e.clientX - r.left) / r.width * PW, (e.clientY - r.top) / r.height * PH];
-$("pages").addEventListener("pointerdown", (e) => { if (!state.adjOn) return; const pg = e.target.closest(".pg"); if (!pg) return;
-  const r = pg.getBoundingClientRect(), p = ptr(e, r); drag = { pg, n: +pg.dataset.n, r, p0: p, p1: p, band: null }; pg.setPointerCapture(e.pointerId); e.preventDefault(); });
-$("pages").addEventListener("pointermove", (e) => { if (!drag) return; drag.p1 = ptr(e, drag.r);
-  if (!drag.band) { drag.band = document.createElement("div"); drag.band.className = "band"; drag.pg.appendChild(drag.band); }
-  const [a, b] = [drag.p0, drag.p1], s = drag.band.style;
-  s.left = Math.min(a[0], b[0]) / PW * 100 + "%"; s.top = Math.min(a[1], b[1]) / PH * 100 + "%";
-  s.width = Math.abs(a[0] - b[0]) / PW * 100 + "%"; s.height = Math.abs(a[1] - b[1]) / PH * 100 + "%"; });
-$("pages").addEventListener("pointerup", (e) => { if (!drag) return; const { n, p0, p1, band } = drag; if (band) band.remove(); drag = null;
-  const g = (state.pages[n] || {}).glyphs || [], add = e.shiftKey;
-  if (Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < 6) { let best = null, ba = 1e9;
-    for (const q of g) if (p0[0] >= q[1] - 3 && p0[0] <= q[1] + q[3] + 3 && p0[1] >= q[2] - 3 && p0[1] <= q[2] + q[4] + 3 && q[3] * q[4] < ba) { best = q; ba = q[3] * q[4]; }
-    if (!add) state.sel.clear(); if (best) { state.sel.has(best[0]) && add ? state.sel.delete(best[0]) : state.sel.add(best[0]); }
-  } else { const x0 = Math.min(p0[0], p1[0]), x1 = Math.max(p0[0], p1[0]), y0 = Math.min(p0[1], p1[1]), y1 = Math.max(p0[1], p1[1]);
-    if (!add) state.sel.clear(); for (const q of g) { const cx = q[1] + q[3] / 2, cy = q[2] + q[4] / 2; if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) state.sel.add(q[0]); } }
-  drawSel(); });
-function nudge(dx, dy, rot, sc) { if (!state.sel.size) return done("Select some letters first.", "err");
-  state.pages.forEach((pg, n) => { for (const q of pg.glyphs || []) if (state.sel.has(q[0])) {
-    const a = state.adjust[q[0]] || (state.adjust[q[0]] = [0, 0, 0, 1]); a[0] += dx; a[1] += dy; a[2] += rot; a[3] *= sc; q[1] += dx; q[2] += dy; state.dirty.add(n); } });
-  drawSel(); clearTimeout(state.adjT); state.adjT = setTimeout(applyAdjust, 600); }
-async function applyAdjust() { if (state.busy) { state.adjT = setTimeout(applyAdjust, 400); return; }
-  const only = [...state.dirty]; state.dirty.clear(); if (only.length) await run({ only }); }
-$("adj").onclick = (e) => { const b = e.target.closest("button"); if (!b) return;
-  if (b.id === "adjreset") { state.pages.forEach((pg, n) => { for (const q of pg.glyphs || []) if (state.sel.has(q[0]) && state.adjust[q[0]]) { delete state.adjust[q[0]]; state.dirty.add(n); } });
-    clearTimeout(state.adjT); state.adjT = setTimeout(applyAdjust, 300); } else if (b.dataset.a) nudge(...b.dataset.a.split(",").map(Number)); };
-document.addEventListener("keydown", (e) => { if (!state.adjOn || !state.sel.size || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
-  const k = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] }[e.key], s = e.shiftKey ? 8 : 2;
-  if (k) { nudge(k[0] * s, k[1] * s, 0, 1); e.preventDefault(); } else if (e.key === "Escape") { state.sel.clear(); drawSel(); } });
+let drag = null;
+$("pages").addEventListener("pointerdown", (e) => {
+  if (!state.adjOn) return; const pg = e.target.closest(".pg"); if (!pg) return;
+  const n = +pg.dataset.n, r = pg.getBoundingClientRect(), p = ptr(e, r), hn = e.target.closest(".hnd");
+  if (hn) { const c = centroid(selGlyphs().filter((g) => g.n === n));
+    drag = { mode: hn.dataset.h, n, pg, r, p0: p, c, a0: Math.atan2(p[1] - c[1], p[0] - c[0]), d0: Math.hypot(p[0] - c[0], p[1] - c[1]) || 1 };
+  } else { const hit = hitTest(n, p);
+    if (state.selPage !== n) { state.sel.clear(); state.selPage = n; }
+    if (hit) { const ids = state.gran === "word" ? wordIds(n, hit) : [hit[0]];
+      if (e.shiftKey) ids.forEach((id) => (state.sel.has(id) ? state.sel.delete(id) : state.sel.add(id)));
+      else if (!state.sel.has(hit[0])) state.sel = new Set(ids);
+      drag = { mode: "move", n, pg, r, p0: p, hit, ids, shift: e.shiftKey };
+    } else { if (!e.shiftKey) state.sel.clear(); drag = { mode: "band", n, pg, r, p0: p, p1: p }; } }
+  pg.setPointerCapture(e.pointerId); drawSel(); updInsp(); });
+$("pages").addEventListener("pointermove", (e) => { if (!drag) return; const p = ptr(e, drag.r);
+  if (drag.mode === "move") { const dx = p[0] - drag.p0[0], dy = p[1] - drag.p0[1]; if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true; drag.T = { dx, dy, rot: 0, sc: 1 }; drawSel(drag.T);
+  } else if (drag.mode === "rot") { let a = (Math.atan2(p[1] - drag.c[1], p[0] - drag.c[0]) - drag.a0) * 180 / Math.PI; if (e.shiftKey) a = Math.round(a / 15) * 15;
+    drag.T = { dx: 0, dy: 0, rot: a, sc: 1 }; drawSel(drag.T);
+  } else if (drag.mode === "size") { drag.T = { dx: 0, dy: 0, rot: 0, sc: Math.min(3, Math.max(.3, Math.hypot(p[0] - drag.c[0], p[1] - drag.c[1]) / drag.d0)) }; drawSel(drag.T);
+  } else { drag.p1 = p; if (!drag.band) { drag.band = document.createElement("div"); drag.band.className = "band"; drag.pg.appendChild(drag.band); }
+    const [a, b] = [drag.p0, p], s = drag.band.style; s.left = Math.min(a[0], b[0]) / PW * 100 + "%"; s.top = Math.min(a[1], b[1]) / PH * 100 + "%";
+    s.width = Math.abs(a[0] - b[0]) / PW * 100 + "%"; s.height = Math.abs(a[1] - b[1]) / PH * 100 + "%"; } });
+$("pages").addEventListener("pointerup", () => { if (!drag) return; const d = drag; drag = null; if (d.band) d.band.remove();
+  if (d.mode === "band") { const [p0, p1] = [d.p0, d.p1];
+    if (Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) >= 6) { const x0 = Math.min(p0[0], p1[0]), x1 = Math.max(p0[0], p1[0]), y0 = Math.min(p0[1], p1[1]), y1 = Math.max(p0[1], p1[1]);
+      for (const q of state.pages[d.n].glyphs || []) { const cx = q[1] + q[3] / 2, cy = q[2] + q[4] / 2; if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) state.sel.add(q[0]); } }
+  } else if (d.T) commitT(d.T);
+  else if (d.mode === "move" && !d.shift) state.sel = new Set(d.ids);
+  drawSel(); updInsp(); });
+$("pages").addEventListener("dblclick", (e) => { if (!state.adjOn) return; const pg = e.target.closest(".pg"); if (!pg) return;
+  const n = +pg.dataset.n, q = hitTest(n, ptr(e, pg.getBoundingClientRect())); if (!q) return; state.sel = new Set(wordIds(n, q)); state.selPage = n; drawSel(); updInsp(); });
+document.addEventListener("keydown", (e) => { if (!state.adjOn || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
+  const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+  if (mod && k === "z") { e.preventDefault(); e.shiftKey ? undoRedo("redo", "hist") : undoRedo("hist", "redo"); return; }
+  if (mod && k === "y") { e.preventDefault(); undoRedo("redo", "hist"); return; }
+  if (e.key === "Escape") { state.sel.clear(); drawSel(); updInsp(); return; }
+  const d = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] }[e.key];
+  if (d && state.sel.size) { const s = e.shiftKey ? 8 : 1.5; commitT({ dx: d[0] * s, dy: d[1] * s, rot: 0, sc: 1 }, true); e.preventDefault(); } });
 
 // ---- downloads ----
 function saveAs(href, name) { const a = document.createElement("a"); a.href = href; a.download = name; document.body.appendChild(a); a.click(); a.remove(); }
 const loadImg = (src) => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = src; });
 const jpegBytes = (b64) => { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
-$("dlpng").onclick = async () => { for (let i = 0; i < state.pages.length; i++) { const im = await loadImg("data:image/jpeg;base64," + state.pages[i].img);
+$("dlpng").onclick = async () => { await flushEdits(); for (let i = 0; i < state.pages.length; i++) { const im = await loadImg("data:image/jpeg;base64," + state.pages[i].img);
   const c = document.createElement("canvas"); c.width = im.naturalWidth; c.height = im.naturalHeight; c.getContext("2d").drawImage(im, 0, 0);
   saveAs(c.toDataURL("image/png"), `inktwin-page-${i + 1}.png`); await new Promise((r) => setTimeout(r, 300)); } };
-$("dlpdf").onclick = () => { const url = URL.createObjectURL(makePdf(state.pages.map((p) => ({ bytes: jpegBytes(p.img), w: PW, h: PH }))));
+$("dlpdf").onclick = async () => { await flushEdits(); const url = URL.createObjectURL(makePdf(state.pages.map((p) => ({ bytes: jpegBytes(p.img), w: PW, h: PH }))));
   saveAs(url, "inktwin.pdf"); setTimeout(() => URL.revokeObjectURL(url), 8000); };
 function makePdf(jp) { // minimal PDF writer: one A4 page per JPEG, any number of pages
   const enc = new TextEncoder(), parts = [], offs = []; let len = 0;
@@ -239,7 +315,7 @@ function scanCanvas(im, mode) {
     d[i] = R * 255; d[i + 1] = G * 255; d[i + 2] = Bb * 255; }
   x.putImageData(D, 0, 0); return c;
 }
-async function scanAll() { status("Scanning…", "busy"); await new Promise((r) => setTimeout(r, 30)); const out = [];
+async function scanAll() { await flushEdits(); status("Scanning…", "busy"); await new Promise((r) => setTimeout(r, 30)); const out = [];
   for (const p of state.pages) { out.push(scanCanvas(await loadImg("data:image/jpeg;base64," + p.img), $("scanmode").value)); await new Promise((r) => setTimeout(r, 0)); }
   done("Scan ready", "ok"); return out; }
 $("scanjpg").onclick = async () => { const cs = await scanAll(); cs.forEach((c, i) => setTimeout(() => saveAs(c.toDataURL("image/jpeg", .85), `inktwin-scan-${i + 1}.jpg`), i * 300)); };

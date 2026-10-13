@@ -4,3 +4,4 @@ gunicorn>=21.2
 numpy>=1.26
 opencv-python-headless>=4.9
 pillow>=10.1
+pdfplumber>=0.11

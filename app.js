@@ -84,8 +84,10 @@ $("fmt").onclick = (e) => { const b = e.target.closest("button"); if (!b) return
 $("fcol").onchange = () => { if ($("fcol").value) wrapSel(`{{${$("fcol").value}|`, "}}"); $("fcol").value = ""; };
 
 // ---- generation (streamed page by page) ----
-function settings() { return { variation: $("variation").value / 100, mood: state.mood, paper: $("paper").value, pen: $("pen").value,
-  signature: state.sig, sig_pos: $("sigpos").value }; }
+function settings() { const v = (id) => +$("sl-" + id).value;
+  return { size: v("size") / 100, spacing: v("spacing") / 100, wordgap: v("wordgap") / 100, slant: v("slant"), drift: v("drift") / 100,
+    neat: v("neat") / 100, rand: v("rand") / 100, ink: v("ink") / 100, thick: v("thick") / 100, texture: v("texture") / 100, light: v("light") / 100,
+    ink_color: state.inkColor || null, paper: $("paper").value, pen: $("pen").value, signature: state.sig, sig_pos: $("sigpos").value }; }
 function pageEl(n) { const box = $("pages");
   while (box.children.length <= n) { const d = document.createElement("div"); d.className = "pg"; d.dataset.n = box.children.length;
     d.innerHTML = '<img alt="" draggable="false"><div class="sel"></div>'; d.firstChild.alt = `Page ${box.children.length + 1}`; box.appendChild(d); }
@@ -94,9 +96,10 @@ async function run(opts = {}) {
   if (state.busy || !state.profile) return;
   const text = $("text").value; if (!text.trim()) return done("Type some text first.", "err");
   const fresh = !opts.only;
-  if (fresh) { state.hist = []; state.redo = []; state.selPage = null; updUndo(); updInsp(); state.adjust = {}; state.sel.clear(); state.dirty.clear(); state.pages = []; state.seed = null; $("pages").innerHTML = ""; }
+  const prevImgs = fresh ? state.pages.map((p) => p && p.img) : [], keep = opts.keepSeed ? state.seed : null;
+  if (fresh) { state.hist = []; state.redo = []; state.selPage = null; updUndo(); updInsp(); state.adjust = {}; state.sel.clear(); state.dirty.clear(); state.pages = []; state.seed = keep; $("pages").innerHTML = ""; }
   state.busy = true; $("gen").disabled = $("regen").disabled = true;
-  const st0 = { ...settings(), adjust: state.adjust, only: opts.only || null };
+  const st0 = { ...settings(), adjust: state.adjust, only: opts.only || null, preview: opts.preview ? 1 : null };
   const fatal = (msg) => Object.assign(new Error(msg), { fatal: true });
   let meta = null, tries = 0; status(opts.only ? "Updating page…" : "Generating…", "busy");
   while (!meta) {
@@ -116,7 +119,7 @@ async function run(opts = {}) {
           if (Object.keys(m).length === 1 && "seed" in m) { state.seed = m.seed; continue; }
           if (typeof m.n !== "number") throw fatal("The server is running an older version of InkTwin. Redeploy the backend (backend/app.py and backend/engine.py) on Render.");
           const el = pageEl(m.n), pg = (state.pages[m.n] ||= {});
-          if (m.img) { pg.img = m.img; if (fresh) pg.base = m.img; el.firstChild.src = "data:image/jpeg;base64," + m.img; el.style.setProperty("--pg", `url(data:image/jpeg;base64,${m.img})`); }
+          if (m.img) { pg.base = fresh ? (prevImgs[m.n] || m.img) : (pg.img || m.img); pg.img = m.img; el.firstChild.src = "data:image/jpeg;base64," + m.img; el.style.setProperty("--pg", `url(data:image/jpeg;base64,${m.img})`); }
           pg.glyphs = m.glyphs; $("editorBox").hidden = true; $("result").hidden = false; applyZoom(); drawSel();
           if (!opts.only) status(`Writing page ${m.n + 1}…`, "busy"); } }
       if (!meta) throw new Error("stream ended early");
@@ -126,16 +129,33 @@ async function run(opts = {}) {
       status(`Connection dropped — resuming at page ${state.pages.length + 1}…`, "busy"); await new Promise((r) => setTimeout(r, 2500));
     } finally { clearTimeout(wd); }
   }
-  if (meta) { state.seed = meta.seed; let t = `Complete — ${state.pages.length} page${state.pages.length > 1 ? "s" : ""}`;
+  if (meta) { state.seed = meta.seed; state.preview = !!meta.preview; $("prevbar").hidden = !state.preview; let t = `Complete — ${state.pages.length} page${state.pages.length > 1 ? "s" : ""}`;
     if (meta.missing.length) t += `, skipped unsupported characters: ${meta.missing.join(" ")}`;
-    if (meta.truncated) t += " — stopped at the page limit"; done(t, "ok"); }
+    if (meta.truncated && !meta.preview) t += " — stopped at the page limit";
+    if (meta.preview) t = "Preview of page 1 — press “Render all pages” for the whole document"; done(t, "ok"); }
   state.busy = false; $("gen").disabled = $("regen").disabled = false;
 }
 $("gen").onclick = () => run(); $("regen").onclick = () => run();
-let deb; const live = () => { if ($("result").hidden) return; clearTimeout(deb); deb = setTimeout(() => run(), 700); };
-["variation", "paper", "pen", "seed", "sigpos"].forEach((id) => $(id).addEventListener("change", live));
-$("mood").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; state.mood = b.dataset.v;
-  document.querySelectorAll("#mood button").forEach((x) => x.classList.toggle("on", x === b)); live(); };
+// ---- live generation controls: sliders re-render a fast page-1 preview with the same seed ----
+let deb; const live = () => { if (!state.profile || $("result").hidden) return; clearTimeout(deb);
+  const go = () => (state.busy ? setTimeout(go, 300) : run({ keepSeed: true, preview: true })); deb = setTimeout(go, 500); };
+const SL = [["hand", "size", "Letter size", 60, 160, 100, "%"], ["hand", "spacing", "Letter spacing", 0, 200, 100, "%"], ["hand", "wordgap", "Word spacing", 50, 200, 100, "%"],
+  ["hand", "slant", "Slant", -20, 20, 0, "°"], ["hand", "drift", "Baseline drift", 0, 300, 100, "%"], ["var", "neat", "Neatness", 0, 100, 50, ""], ["var", "rand", "Randomness", 0, 100, 50, ""],
+  ["ink", "ink", "Ink darkness", 40, 160, 100, "%"], ["ink", "thick", "Stroke thickness", 60, 180, 100, "%"], ["paper", "texture", "Paper texture", 0, 200, 100, "%"], ["paper", "light", "Lighting strength", 0, 200, 100, "%"]];
+const setSl = (id, v) => { const el = $("sl-" + id); el.value = v; $("v-" + id).textContent = v + el.dataset.u; };
+const clearMood = () => document.querySelectorAll("#mood button").forEach((x) => x.classList.remove("on"));
+for (const [g, id, label, min, max, def, u] of SL) { const l = document.createElement("label"); l.className = "sl";
+  l.innerHTML = `<span>${label} <b id="v-${id}">${def}${u}</b></span><input type="range" id="sl-${id}" min="${min}" max="${max}" value="${def}" data-u="${u}">`;
+  $("g-" + g).appendChild(l);
+  l.lastChild.addEventListener("input", (e) => { $("v-" + id).textContent = e.target.value + u; if (id === "neat" || id === "rand") clearMood(); live(); }); }
+const PRE = { neat: [80, 30], normal: [50, 50], rushed: [30, 60], messy: [10, 80] };
+$("mood").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; setSl("neat", PRE[b.dataset.v][0]); setSl("rand", PRE[b.dataset.v][1]); clearMood(); b.classList.add("on"); live(); };
+["paper", "pen", "sigpos"].forEach((id) => $(id).addEventListener("change", live));
+$("seed").addEventListener("change", () => { if (!$("result").hidden) run(); });
+$("inkcolor").oninput = (e) => { state.inkColor = e.target.value; live(); };
+$("inkdef").onclick = () => { state.inkColor = null; live(); };
+$("resetctl").onclick = () => { for (const [, id, , , , def] of SL) setSl(id, def); state.inkColor = null; clearMood(); document.querySelector('#mood [data-v="normal"]').classList.add("on"); live(); };
+$("renderall").onclick = () => run({ keepSeed: true });
 function applyZoom() { for (const el of $("pages").children) el.style.width = $("zoom").value + "%"; }
 $("zoom").oninput = applyZoom;
 
@@ -178,7 +198,7 @@ function schedule(ms = 450) { clearTimeout(state.adjT); state.adjT = setTimeout(
 function after() { updUndo(); drawSel(); updInsp(); schedule(); }
 function markPages(ids) { const m = gmap(); ids.forEach((id) => { const g = m.get(+id); if (g) state.dirty.add(g.n); }); }
 async function applyAdjust() { if (state.busy) { schedule(300); return; } const only = [...state.dirty]; state.dirty.clear(); if (only.length) { await run({ only }); updInsp(); } }
-async function flushEdits() { clearTimeout(state.adjT); while (state.busy) await sleep(150); const only = [...state.dirty]; state.dirty.clear(); if (only.length) await run({ only }); }
+async function flushEdits() { clearTimeout(state.adjT); clearTimeout(deb); while (state.busy) await sleep(150); if (state.preview) { await run({ keepSeed: true }); while (state.busy) await sleep(150); } const only = [...state.dirty]; state.dirty.clear(); if (only.length) await run({ only }); }
 function commitT(T, coalesce) {
   const gs = selGlyphs(); if (!gs.length) return done("Click a letter first.", "err");
   pushHist(coalesce); const [cx, cy] = centroid(gs), Tm = { cx, cy, ...T };
@@ -324,3 +344,31 @@ $("scanpdf").onclick = async () => { const cs = await scanAll(), jp = [];
   const url = URL.createObjectURL(makePdf(jp)); saveAs(url, "inktwin-scan.pdf"); setTimeout(() => URL.revokeObjectURL(url), 8000); };
 
 try { const p = JSON.parse(localStorage.getItem("inktwin.profile") || "null"); if (p && p.glyphs) { state.profile = p; showProfile(); } } catch {}
+
+// ---- smart importer: TXT / Markdown / DOCX / PDF on the server, photos OCR'd in the browser (Tesseract.js) ----
+$("imp").onclick = () => $("impfile").click();
+$("impfile").onchange = async () => { const f = $("impfile").files[0]; $("impfile").value = ""; if (f) await importFile(f); };
+async function jpost(path, obj) { let r; try { r = await fetch(API + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obj) }); }
+  catch { throw new Error("Can't reach the server. It may be waking up — wait 30 seconds and retry."); }
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || `Request failed (${r.status})`); return j; }
+async function shrink(f, max = 2600) { const bm = await createImageBitmap(f), k = Math.min(1, max / Math.max(bm.width, bm.height));
+  const c = document.createElement("canvas"); c.width = Math.round(bm.width * k); c.height = Math.round(bm.height * k);
+  c.getContext("2d").drawImage(bm, 0, 0, c.width, c.height); return new Promise((r) => c.toBlob(r, "image/png")); }
+async function ocr(f) {
+  if (!window.Tesseract) await new Promise((ok, no) => { const s = document.createElement("script"); s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+    s.onload = ok; s.onerror = () => no(new Error("Couldn't load the text-recognition engine. Check your internet connection.")); document.head.appendChild(s); });
+  const { data } = await Tesseract.recognize(await shrink(f), "eng", { logger: (m) => m.status && status(`Reading the photo: ${m.status}${m.progress ? " " + Math.round(m.progress * 100) + "%" : ""}`, "busy") });
+  return data.text; }
+async function importFile(f) {
+  status("Importing…", "busy");
+  try { let res;
+    if (f.type.startsWith("image/")) res = await jpost("/api/import", { kind: "ocr", text: await ocr(f) });
+    else { const fd = new FormData(); fd.append("file", f); res = await post("/api/import", fd); }
+    showImport(res, f.name); done("Imported — review it, then insert", "ok");
+  } catch (e) { done(e.message, "err"); } }
+function showImport(res, name) { const s = res.stats, pages = Math.max(1, Math.ceil(s.chars / 1800));
+  $("impnote").textContent = `${name}: ${s.chars.toLocaleString()} characters · ${s.headings} headings · ${s.lists} list items · ${s.tables} tables · ${s.math} maths expressions · about ${pages} page${pages > 1 ? "s" : ""}, split automatically.` + (res.warnings.length ? " " + res.warnings.join(" ") : "");
+  $("imptext").value = res.text; $("impdlg").showModal(); }
+const impFill = (append) => { const t = $("imptext").value; ta.value = ((append && ta.value.trim()) ? ta.value.replace(/\s+$/, "") + "\n\n" : "") + t;
+  ta.value = ta.value.slice(0, state.max); count(); $("impdlg").close(); };
+$("impreplace").onclick = () => impFill(false); $("impappend").onclick = () => impFill(true); $("impcancel").onclick = () => $("impdlg").close();

@@ -226,14 +226,14 @@ def layout(kind):
     return dict(pitch=p, left=left, right=PW - 90, base=[y - off for y in ys], ys=ys, top=top)
 
 
-def draw_paper(kind, rng):
+def draw_paper(kind, rng, tex=1.0, light=1.0):
     L = layout(kind)
     white = (254, 254, 254) if kind == "blank" else (245, 246, 244) if kind == "classmate" else (250, 249, 246)
     im = Image.new("RGB", (PW, PH), white)
     d = ImageDraw.Draw(im)
     for _ in range(220):  # paper fibres
         x, y, l, t = int(rng.integers(0, PW)), int(rng.integers(0, PH)), int(rng.integers(6, 22)), rng.uniform(0, 6.28)
-        c = int(rng.integers(222, 238))
+        c = int(255 - (255 - int(rng.integers(222, 238))) * tex)
         d.line([(x, y), (x + l * math.cos(t), y + l * math.sin(t))], fill=(c, c, c - 2), width=1)
     if kind in ("lined", "notebook", "exam", "classmate"):
         lc = (128, 168, 214) if kind == "classmate" else (172, 192, 222)
@@ -267,8 +267,8 @@ def draw_paper(kind, rng):
     n = cv2.GaussianBlur(rng.standard_normal((PH, PW), dtype=np.float32), (0, 0), 1.1)
     n /= n.std() + 1e-6
     lf = cv2.resize(rng.normal(0, 1, (9, 7)).astype(np.float32), (PW, PH), interpolation=cv2.INTER_CUBIC)
-    vig = _vig()
-    return a * (1 + 0.018 * n + 0.012 * lf)[..., None] * vig[..., None], L
+    vig = 1 - light * (1 - _vig())
+    return a * (1 + tex * (0.018 * n + 0.012 * lf))[..., None] * vig[..., None], L
 
 
 def load_signature(v):
@@ -308,7 +308,7 @@ SUBS = {"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "\u2013": "-
 TOKC = re.compile(r"\{\{([rbgk])\|")
 
 
-def finish_page(inks, paper, pen, rng, kind=""):
+def finish_page(inks, paper, pen, rng, kind="", light=1.0, inkd=1.0, ink_rgb=None):
     P = PENS[pen]
     lf = 0.9 + 0.12 * cv2.resize(rng.random((12, 9)).astype(np.float32), (PW, PH), interpolation=cv2.INTER_CUBIC)
     gr = sk = None
@@ -325,14 +325,14 @@ def finish_page(inks, paper, pen, rng, kind=""):
             a = a * (0.55 + 0.6 * gr)
         if sk is not None:
             a = a * sk
-        a = np.clip(np.maximum(a, P["bleed"] * cv2.GaussianBlur(a, (0, 0), 1.2)) * P["op"], 0, 1)
-        col = np.array(P["color"] if pen == "pencil" or name == "pen" else PALETTE[name], np.float32) / 255
+        a = np.clip(np.maximum(a, P["bleed"] * cv2.GaussianBlur(a, (0, 0), 1.2)) * P["op"] * inkd, 0, 1)
+        col = np.array(ink_rgb if (ink_rgb and name == "pen") else (P["color"] if pen == "pencil" or name == "pen" else PALETTE[name]), np.float32) / 255
         out = out * (1 - a[..., None] * (1 - col))
     back = np.max(list(inks.values()), axis=0) if inks else np.zeros((PH, PW), np.float32)
     xs = np.linspace(0, 1, PW, dtype=np.float32)[None, :, None]
     yv = np.linspace(0, 1, PH, dtype=np.float32)[:, None, None]
     th = rng.uniform(0, 6.28)
-    out = out * 1.05 * (1 + 0.07 * ((xs - .5) * math.cos(th) + (yv - .5) * math.sin(th))) * (1 - 0.13 * np.exp(-xs / 0.06))
+    out = out * 1.05 * (1 + 0.07 * light * ((xs - .5) * math.cos(th) + (yv - .5) * math.sin(th))) * (1 - 0.13 * light * np.exp(-xs / 0.06))
     if kind == "classmate":
         out = out * (1 - 0.06 * cv2.GaussianBlur(back[:, ::-1].copy(), (0, 0), 2.2)[..., None])
     gx, gy = _mesh()
@@ -356,7 +356,7 @@ def stamp(ink, g, sc, x, by, ang, shear, gain, blur, bold=0):
     S = np.array([[1, shear, -shear * cy], [0, 1, 0], [0, 0, 1]])
     R = np.vstack([cv2.getRotationMatrix2D((cx, cy), ang, 1), [0, 0, 1]])
     c = cv2.warpAffine(c, (R @ S)[:2], (c.shape[1], c.shape[0]), flags=cv2.INTER_LINEAR)
-    c = np.clip(cv2.GaussianBlur(c, (0, 0), blur + .3 * bold) * gain * (1 + .35 * bold), 0, 1)
+    c = np.clip(cv2.GaussianBlur(c, (0, 0), max(.15, blur + .3 * bold)) * gain * max(.3, 1 + .35 * bold), 0, 1)
     x0, y0 = int(round(x - p)), int(round(by - cy))
     sx0, sy0 = max(0, -x0), max(0, -y0)
     ex, ey = min(c.shape[1], PW - x0), min(c.shape[0], PH - y0)
@@ -374,19 +374,21 @@ def hand_line(ink, x0, y0, x1, y1, rng, amp, th=2):
 
 
 def inline(t):
-    """**bold** //italic// __underline__ {{r|red}} (r b g k) -> [(char, (bold, italic, underline, colour))]. Backslash escapes."""
-    out, k, b, i, u, col = [], 0, 0, 0, 0, None
+    """**bold** //italic// __underline__ {{r|red}} ^{sup} _{sub} -> [(char, (bold, italic, underline, colour, pos))]. Backslash escapes."""
+    out, k, b, i, u, col, ps = [], 0, 0, 0, 0, None, 0
     while k < len(t):
         c2 = t[k:k + 2]
-        if t[k] == "\\" and k + 1 < len(t) and t[k + 1] in "*/_{}#-|[>":
-            out.append((t[k + 1], (b, i, u, col))); k += 2; continue
+        if t[k] == "\\" and k + 1 < len(t) and t[k + 1] in "*/_{}#-|[>^":
+            out.append((t[k + 1], (b, i, u, col, ps))); k += 2; continue
         if c2 == "**": b ^= 1; k += 2; continue
         if c2 == "//": i ^= 1; k += 2; continue
         if c2 == "__": u ^= 1; k += 2; continue
+        if c2 in ("^{", "_{"): ps = 1 if c2 == "^{" else -1; k += 2; continue
+        if ps and t[k] == "}": ps = 0; k += 1; continue
         m = TOKC.match(t, k)
         if m: col = m.group(1); k = m.end(); continue
         if c2 == "}}" and col: col = None; k += 2; continue
-        out.append((t[k], (b, i, u, col))); k += 1
+        out.append((t[k], (b, i, u, col, ps))); k += 1
     return out
 
 
@@ -398,22 +400,28 @@ def generate(profile, text, s):
     rng = np.random.default_rng(used)
     gl = _decode(profile)
     kind, pen = s.get("paper", "classmate"), s.get("pen", "ballpoint")
-    amp = (0.25 + 1.5 * float(s.get("variation", .5))) * MOODS[s.get("mood", "normal")]
+    neat = float(s["neat"]) if s.get("neat") is not None else {"neat": .8, "normal": .5, "rushed": .3, "messy": .1}[s.get("mood", "normal")]
+    mic = .25 + 1.5 * float(s.get("rand", s.get("variation", .5)))  # randomness: letter-by-letter jitter
+    mac = 2 * (1 - neat)  # sloppiness: word/line-level wobble, drift, size creep
+    drift_k, size_k, slant = float(s.get("drift", 1)), float(s.get("size", 1)), float(s.get("slant", 0))
+    thick, inkd, tex, light = float(s.get("thick", 1)), float(s.get("ink", 1)), float(s.get("texture", 1)), float(s.get("light", 1))
+    inkc, preview = s.get("ink_color"), s.get("preview")
+    lim = min(MAX_PAGES, int(preview)) if preview else MAX_PAGES
     P = PENS[pen]
     lay = layout(kind)
     pitch, nl = lay["pitch"], len(lay["base"])
     xh = pitch * 0.40
-    s0 = xh / float(profile["x_height"])
+    s0 = xh / float(profile["x_height"]) * size_k
     sv = max(float(profile.get("size_variance", .05)), .03)
     bv = max(float(profile.get("baseline_variance", .04)), .02)
     pv = min(float(profile.get("pressure_var", .1)), .25)
-    wsp, csp = float(profile.get("word_spacing", .75)), float(profile.get("char_spacing", .14))
+    wsp, csp = float(profile.get("word_spacing", .75)) * float(s.get("wordgap", 1)), float(profile.get("char_spacing", .14)) * float(s.get("spacing", 1))
     avail = lay["right"] - lay["left"]
     only, adj, frm = s.get("only"), s.get("adjust") or {}, s.get("from")
     yield ("seed", used)  # lets a client resume the exact same document after a dropped connection
     missing, last, inks, man = set(), {}, {}, []
     pages = gi = li = wg = 0
-    NS = (0, 0, 0, None)
+    NS = (0, 0, 0, None, 0)
 
     text = text.replace("\r", "").expandtabs(4)
     for k_, v_ in SUBS.items():
@@ -445,9 +453,11 @@ def generate(profile, text, s):
                 continue
             vi = pick(ch, len(lst))
             g = lst[vi]
-            sc = s0 * mult * float(np.clip(1 + rng.normal(0, sv * amp * .6), .8, 1.25))
-            if rng.random() < .04 * amp:
+            sc = s0 * mult * float(np.clip(1 + rng.normal(0, sv * mic * .6), .8, 1.25))
+            if rng.random() < .04 * mic:
                 sc *= 1 + rng.normal(0, .08)
+            if st[4]:
+                sc *= .62  # super/subscript
             ins.append((g, sc, st, ch, vi))
         return ins
 
@@ -493,23 +503,23 @@ def generate(profile, text, s):
         left = lay["left"] if left is None else left
         av = avail if av is None else av
         by0 = lay["base"][li_]
-        x = left + {"l": 0, "c": (av - cw) / 2, "r": av - cw}[align] + rng.normal(0, 2 * amp)
+        x = left + {"l": 0, "c": (av - cw) / 2, "r": av - cw}[align] + rng.normal(0, 2 * mic)
         xs0 = x
-        A, ph, slope, lp = 1.5 * amp, rng.uniform(0, 6.28), rng.normal(0, .004 * amp), rng.normal(0, 1)
+        A, ph, slope, lp = 1.5 * mac * drift_k, rng.uniform(0, 6.28), rng.normal(0, .004 * mac * drift_k), rng.normal(0, 1)
         for wi, word in enumerate(words):
             if wi:
-                x += xh * mult * wsp * float(np.clip(1 + rng.normal(0, .2 * amp), .5, 1.8))
-            wdy, wang, wpr = rng.normal(0, .05 * xh * amp), rng.normal(0, .6 * amp), rng.normal(0, .04 * amp)
+                x += xh * mult * wsp * float(np.clip(1 + rng.normal(0, .2 * mac), .5, 1.8))
+            wdy, wang, wpr = rng.normal(0, .05 * xh * mac), rng.normal(0, .6 * mac), rng.normal(0, .04 * mac)
             ux = None
             wg += 1
-            for g, sc, (b_, i_, u_, c_), ch0, vi0 in word:
+            for g, sc, (b_, i_, u_, c_, ps_), ch0, vi0 in word:
                 prog = (x - left) / av
                 drift = A * math.sin(2 * math.pi * prog / 1.3 + ph) + slope * (x - left)
-                sc *= 1 - .035 * max(amp - .6, 0) * prog
-                dy = rng.normal(0, bv * xh * amp * .6) + wdy + drift + lp * .3
-                ang = rng.normal(0, 1.3 * amp) + wang
-                gain = float(np.clip(1 + rng.normal(0, (.06 + pv) * amp) + wpr, .6, 1.25)) * P["gain"]
-                sh = rng.normal(0, .03 * amp) + (.22 if i_ else 0)
+                sc *= 1 - .035 * max(mac - .6, 0) * prog
+                dy = rng.normal(0, bv * xh * mic * .6) + wdy + drift + lp * .3 - (ps_ and (.62 if ps_ > 0 else -.3) * xh * mult)
+                ang = rng.normal(0, 1.3 * mic) + wang
+                gain = float(np.clip(1 + rng.normal(0, (.06 + pv) * mic) + wpr, .6, 1.25)) * P["gain"]
+                sh = rng.normal(0, .03 * mic) + (-.22 if i_ else 0) - math.tan(math.radians(slant))  # negative shear leans right
                 # manual edit: [dx, dy, rotation (clockwise deg), scale, variant (-1 = as generated), replacement char ("" = none)]
                 ddx, ddy, dr, ds, av_, ac_ = adj.get(str(gi), (0, 0, 0, 1, -1, ""))
                 ch1, vi1 = ac_ or ch0, vi0
@@ -523,16 +533,16 @@ def generate(profile, text, s):
                 th, dyc = math.radians(-dr), (gh0 / 2 - t0) * ds  # scale and rotate about the glyph's centre
                 xn = x + ddx - gw0 * (ds - 1) / 2  # un-rotated box, centred on the glyph's visual centre
                 yn = by0 + dy + ddy + (ds - 1) * (t0 - gh0 / 2)
-                stamp(ink(c_ or "pen"), gg, sc * ds, xn - dyc * math.sin(th), yn + dyc * (1 - math.cos(th)), ang - dr, sh, gain, P["blur"], b_)
+                stamp(ink(c_ or "pen"), gg, sc * ds, xn - dyc * math.sin(th), yn + dyc * (1 - math.cos(th)), ang - dr, sh, gain, P["blur"], b_ + (thick - 1) * 2)
                 man.append([gi, round(xn, 1), round(yn - gg["top"] * sc * ds, 1), round(gw0 * ds, 1), round(gh0 * ds, 1), ch1, wg, vi1, len(lst)])
                 gi += 1
                 if u_ and ux is None:
                     ux = (x, c_)
-                x += gw + xh * csp * mult * float(np.clip(1 + rng.normal(0, .35 * amp), .1, 2))
+                x += gw + xh * csp * mult * float(np.clip(1 + rng.normal(0, .35 * mic), .1, 2))
             if ux:
-                hand_line(ink(ux[1] or "pen"), ux[0], by0 + .3 * xh + wdy, x - xh * csp * mult, by0 + .3 * xh + wdy, rng, amp)
+                hand_line(ink(ux[1] or "pen"), ux[0], by0 + .3 * xh + wdy, x - xh * csp * mult, by0 + .3 * xh + wdy, rng, mic)
         if ul:
-            hand_line(ink("pen"), xs0, by0 + .45 * xh * mult, x, by0 + .45 * xh * mult, rng, amp)
+            hand_line(ink("pen"), xs0, by0 + .45 * xh * mult, x, by0 + .45 * xh * mult, rng, mic)
 
     def flush():
         nonlocal pages
@@ -540,14 +550,14 @@ def generate(profile, text, s):
         data = None
         if (only is None or n in only) and (frm is None or n >= frm):
             r2 = np.random.default_rng([used, n])  # per-page stream: skipping pages never changes other pages
-            paper, _ = draw_paper(kind, r2)
-            data = finish_page(inks, paper, pen, r2, kind)
+            paper, _ = draw_paper(kind, r2, tex, light)
+            data = finish_page(inks, paper, pen, r2, kind, light, inkd, inkc)
         out = (n, data, list(man))
         inks.clear(); man.clear()
         return out
 
     def need(n):  # 0 fits, 1 start new page, 2 page limit reached
-        return 0 if li + n <= nl else (2 if pages + 1 >= MAX_PAGES else 1)
+        return 0 if li + n <= nl else (2 if pages + 1 >= lim else 1)
 
     sig = s.get("signature")
     if sig is not None:  # user's own drawn signature, top of page 1
@@ -582,10 +592,10 @@ def generate(profile, text, s):
                 yt, yb, xl = lay["ys"][li] - pitch, lay["ys"][li + n - 1], lay["left"]
                 tl = ink()
                 if first:
-                    hand_line(tl, xl, yt, xl + avail, yt, rng, amp)
-                hand_line(tl, xl, yb, xl + avail, yb, rng, amp)
+                    hand_line(tl, xl, yt, xl + avail, yt, rng, mic)
+                hand_line(tl, xl, yb, xl + avail, yb, rng, mic)
                 for j in range(nc + 1):
-                    hand_line(tl, xl + j * cwd, yt, xl + j * cwd, yb, rng, amp)
+                    hand_line(tl, xl + j * cwd, yt, xl + j * cwd, yb, rng, mic)
                 for j, c in enumerate(cl):
                     for q, (wds, cwid) in enumerate(c[:n]):
                         place_line(wds, cwid, li + q, left=xl + j * cwd + 10, av=cwd - 20)
@@ -622,7 +632,7 @@ def generate(profile, text, s):
         k += 1
     if man or inks or pages == 0:
         yield ("page", *flush())
-    yield ("done", dict(seed=used, missing=sorted(missing), truncated=truncated))
+    yield ("done", dict(seed=used, missing=sorted(missing), truncated=truncated, preview=bool(preview) and truncated))
 
 
 # ---- free-paper calibration: any plain paper, user copies PROMPT lines ----

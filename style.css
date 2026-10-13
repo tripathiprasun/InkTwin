@@ -74,3 +74,14 @@ button.on{background:var(--ink);color:#fff}
 .sel i.gh{border:0;background-color:transparent;background-image:var(--pg);background-repeat:no-repeat;mix-blend-mode:multiply}
 .hnd{position:absolute;width:13px;height:13px;border-radius:50%;background:#fff;border:2px solid var(--pen);pointer-events:auto;touch-action:none;transform:translate(-50%,-50%)}
 .hnd.rot{cursor:grab}.hnd.size{cursor:nwse-resize}
+
+.panel{max-height:calc(100vh - 24px);overflow:auto}
+.panel details{margin:0;border-top:1px solid var(--line);color:var(--ink);font-size:14px}.panel details:first-of-type{border-top:0}
+.panel summary{color:var(--ink);font-weight:600;padding:12px 0}
+label.sl{display:block;margin:8px 0 10px;font-size:13px}label.sl span{display:flex;justify-content:space-between;margin-bottom:2px}label.sl b{font-weight:500;color:var(--mute)}
+label.sl input{width:100%}
+.colrow{display:flex;gap:10px;align-items:center;margin:4px 0 12px}.colrow input{width:42px;height:32px;padding:0;border:1px solid var(--line);border-radius:6px;background:#fff}
+button.link.inline{display:inline;padding:0}
+.prevbar{margin:0 0 12px;padding:9px 12px;background:#e8ecfb;border:1px solid #c5cff5;border-radius:6px;font-size:14px}
+#imptext{width:100%;min-height:40vh;padding:12px;border:1px solid var(--line);border-radius:6px;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace;background:#fff;color:var(--ink)}
+#impdlg{width:min(760px,92vw)}

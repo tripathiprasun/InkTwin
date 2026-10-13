@@ -1,7 +1,7 @@
-import os, io, json, base64, itertools, queue, threading
+import os, io, re, json, base64, itertools, queue, threading
 from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
-import engine
+import engine, importer
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_REQUEST_MB", "40")) * 1024 * 1024
@@ -31,6 +31,36 @@ def boom(e):
 @app.get("/api/health")
 def health():
     return jsonify(ok=True, max_text=MAX_TEXT, max_pages=engine.MAX_PAGES)
+
+
+@app.post("/api/import")
+def import_doc():
+    """TXT / Markdown / DOCX / PDF upload, or JSON {text, kind:"ocr"} from in-browser OCR -> InkTwin markup."""
+    try:
+        if request.is_json:
+            d = request.get_json(silent=True) or {}
+            t = d.get("text")
+            if not isinstance(t, str) or not t.strip():
+                return err("No text was found in that image. Try a sharper, straighter photo.")
+            res = importer.convert_text(t[:400_000], "ocr" if d.get("kind") == "ocr" else "txt")
+        else:
+            f = request.files.get("file")
+            if not f:
+                return err("Choose a file to import.")
+            data = f.read(MAX_FILE + 1)
+            if len(data) > MAX_FILE:
+                return err(f"File is over {MAX_FILE // 2**20} MB.", 413)
+            res = importer.convert_file(f.filename or "", data)
+    except ValueError as e:
+        return err(str(e))
+    if not res["text"].strip():
+        return err("No text could be extracted from that file.")
+    if len(res["text"]) > MAX_TEXT:
+        cut = res["text"][:MAX_TEXT]
+        res["text"] = cut[:cut.rfind("\n")] if "\n" in cut else cut
+        res["warnings"].append(f"Text was cut at {MAX_TEXT:,} characters.")
+    res["stats"] = importer.stats(res["text"])
+    return jsonify(res)
 
 
 @app.get("/api/prompt")
@@ -99,7 +129,13 @@ def generate():
     if not isinstance(prof, dict) or not isinstance(prof.get("glyphs"), dict) or len(prof["glyphs"]) < 20:
         return err("Invalid handwriting profile. Rebuild it from a sample.")
     s = d.get("settings") or {}
-    only = s.get("only")
+    only, ic = s.get("only"), s.get("ink_color")
+
+    def num(k, lo, hi, dflt):
+        try:
+            return min(max(float(s.get(k, dflt)), lo), hi)
+        except (TypeError, ValueError):
+            return dflt
     clean = dict(
         variation=min(max(float(s.get("variation", .5)), 0), 1),
         mood=s.get("mood") if s.get("mood") in engine.MOODS else "normal",
@@ -109,6 +145,11 @@ def generate():
         signature=engine.load_signature(s.get("signature")),
         sig_pos=s.get("sig_pos") if s.get("sig_pos") in ("left", "center", "right") else "right",
         adjust=clean_adjust(s.get("adjust")),
+        size=num("size", .6, 1.6, 1), spacing=num("spacing", 0, 2, 1), wordgap=num("wordgap", .5, 2, 1), slant=num("slant", -20, 20, 0),
+        drift=num("drift", 0, 3, 1), neat=num("neat", 0, 1, .5), rand=num("rand", 0, 1, .5), ink=num("ink", .4, 1.6, 1),
+        thick=num("thick", .6, 1.8, 1), texture=num("texture", 0, 2, 1), light=num("light", 0, 2, 1),
+        ink_color=tuple(int(ic[i:i + 2], 16) for i in (1, 3, 5)) if isinstance(ic, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", ic) else None,
+        preview=min(max(s["preview"], 1), 5) if isinstance(s.get("preview"), int) else None,
         only={i for i in only if isinstance(i, int)} if isinstance(only, list) else None,
         **{"from": s["from"] if isinstance(s.get("from"), int) and s["from"] >= 0 else None})
     if not GEN.acquire(timeout=30):
